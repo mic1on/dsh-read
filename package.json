@@ -1,0 +1,68 @@
+{
+  "name": "dsh-read",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Read local EPUB / MOBI / text books inside DeepSeek Harness: the /read command streams the text into the conversation like an AI reply, with speed control, pause and progress.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "index.d.ts",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "react": ">=18.0.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "ebook",
+    "epub",
+    "mobi",
+    "reader",
+    "reading"
+  ],
+  "author": "mic1on",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mic1on/dsh-read.git"
+  }
+}
