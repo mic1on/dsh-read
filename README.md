@@ -29,6 +29,10 @@ You  ▸ /read ~/Books/三体.epub
   the text, so the transcript never reflows as paragraphs arrive and the prose scrolls inside
   the card. It tracks a resized window and a changing composer height by reading the two CSS
   variables DSH already publishes from the conversation scroll container.
+- **Illustrations, in place.** A plate in the book becomes its own item in the reading flow:
+it appears where the book put it and playback dwells on it instead of typing past it.
+Bytes are fetched by book + index, so the reader can only ever reach assets the book's
+own package declared.
 - **Streams like a reply.** Paragraphs are revealed character by character, with a caret on
   the active one.
 - **Speed, pause, seek.** 慢 / 中 / 快 presets (10 / 20 / 60 字/秒), and a 自定义 slider from 10 to
@@ -119,7 +123,8 @@ Or just ask the agent in natural language — it can call `book_search` and hand
 
 | Format | How it is read | Notes |
 | --- | --- | --- |
-| `.epub` | OCF/ZIP central directory → OPF manifest and spine → XHTML | Non-linear spine items are skipped; images, fonts and CSS are never inflated |
+| `.epub` | OCF/ZIP central directory → OPF manifest and spine → XHTML | Non-linear spine items are skipped; stylesheets and fonts are never inflated, and only illustrations the manifest declares are read |
+| illustrations | Carried into the flow as their own item | Referenced from the package manifest; a marker the paragraph splitter turns into an image item |
 | unpacked `.epub` | The same OCF package read straight off disk | For books iBooks and some converters leave as a folder — recognised by `META-INF/container.xml` and listed as a book, not a directory |
 | `.mobi` | PalmDB record table → PalmDOC LZ77 | Uncompressed and PalmDOC compression |
 | `.azw3` / `.azw` | Same as `.mobi`, for the MOBI-7 text part | KF8-only files are rejected with a conversion hint |

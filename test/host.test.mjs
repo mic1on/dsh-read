@@ -22,13 +22,16 @@ after(() => rm(sandboxHome, { recursive: true, force: true }))
 function response() {
   return {
     status: 0,
+    headers: {},
     body: '',
     writableEnded: false,
-    writeHead(status) {
+    writeHead(status, headers) {
       this.status = status
+      if (headers) this.headers = headers
     },
     end(body) {
       this.body = body
+      this.raw = Buffer.isBuffer(body) ? body : Buffer.from(String(body))
       this.writableEnded = true
     },
   }
@@ -75,6 +78,15 @@ function mount({ agent, agents } = {}) {
   return { routes, commands, injected, executed }
 }
 
+/** Like request(), but without JSON parsing — for routes that answer with bytes. */
+async function rawRequest(routes, url) {
+  const handler = routes.get(url.split('?')[0])
+  assert.ok(handler, `route not registered: ${url}`)
+  const res = response()
+  await handler({ url, method: 'GET', async *[Symbol.asyncIterator]() {} }, res)
+  return { status: res.status, headers: res.headers, body: res.raw }
+}
+
 async function request(routes, url, { method = 'GET', body } = {}) {
   const handler = routes.get(url.split('?')[0])
   assert.ok(handler, `route not registered: ${url}`)
@@ -117,6 +129,12 @@ async function clearRoots() {
 }
 
 /* ── fixtures ────────────────────────────────────────────────────────────── */
+
+/** Smallest valid PNG: a 1x1 transparent pixel. */
+const PLATE = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
 
 function makeZip(entries) {
   const parts = []
@@ -174,9 +192,15 @@ function fixtureEpub(title = 'Host Fixture') {
       'content.opf',
       `<package><metadata><dc:title>${title}</dc:title></metadata><manifest>` +
         '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>' +
+        '<item id="p1" href="images/plate.png" media-type="image/png"/>' +
         '</manifest><spine><itemref idref="c1"/></spine></package>',
     ],
-    ['ch1.xhtml', `<html><body><h1>\u7b2c\u4e00\u7ae0</h1><p>${prose}</p></body></html>`],
+    [
+      'ch1.xhtml',
+      `<html><body><h1>\u7b2c\u4e00\u7ae0</h1><p>${prose}</p>` +
+        '<p><img alt="picture" src="images/plate.png"/></p></body></html>',
+    ],
+    ['images/plate.png', PLATE],
   ])
 }
 
@@ -243,6 +267,7 @@ test('host plugin exports its cordis name, mounts routes late, and registers /re
   const { routes, commands, injected } = mount()
   assert.deepEqual(injected, [['webServer']])
   assert.deepEqual([...routes.keys()].sort(), [
+    '/dsh-read/api/image',
     '/dsh-read/api/library',
     '/dsh-read/api/open',
     '/dsh-read/api/paragraphs',
@@ -477,6 +502,69 @@ test('一个会话都没有时，开始阅读提示先开一个会话', async ()
   assert.equal(started.payload.ok, false)
   assert.match(started.payload.error, /没有运行中的会话/)
   assert.equal(executed.length, 0)
+})
+
+test('an illustration becomes its own item in the paragraph flow', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-image-'))
+  try {
+    const bookPath = join(directory, 'fixture.epub')
+    await writeFile(bookPath, fixtureEpub())
+    const { routes } = mount()
+
+    const opened = await request(routes, `/dsh-read/api/open?path=${encodeURIComponent(bookPath)}`)
+    assert.equal(opened.payload.book.imageCount, 1, 'the plate must be counted')
+
+    const page = await request(
+      routes,
+      `/dsh-read/api/paragraphs?path=${encodeURIComponent(bookPath)}&from=0&count=30`,
+    )
+    const images = page.payload.items.filter((item) => item.image !== undefined)
+    assert.equal(images.length, 1, 'the plate must hold a place in the flow')
+    assert.equal(typeof images[0].image, 'number')
+    // It sits after the prose, where the book put it.
+    assert.ok(
+      page.payload.items.indexOf(images[0]) > 0,
+      'the illustration must not jump to the front of the book',
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('the image route serves declared plates and refuses everything else', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-image-route-'))
+  try {
+    const bookPath = join(directory, 'fixture.epub')
+    await writeFile(bookPath, fixtureEpub())
+    const { routes } = mount()
+
+    const res = await rawRequest(
+      routes,
+      `/dsh-read/api/image?path=${encodeURIComponent(bookPath)}&index=0`,
+    )
+    assert.equal(res.status, 200)
+    assert.equal(res.headers['content-type'], 'image/png')
+    // A real PNG header, not an error body wearing an image content type.
+    assert.equal(res.body.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+
+    // An index the book does not have is refused rather than reaching for a path.
+    const missing = await request(
+      routes,
+      `/dsh-read/api/image?path=${encodeURIComponent(bookPath)}&index=99`,
+    )
+    assert.equal(missing.payload.ok, false)
+    assert.match(missing.payload.error, /no image at index/)
+
+    // The route takes a book path plus an index; there is no way to ask for a bare file.
+    const notABook = await request(
+      routes,
+      `/dsh-read/api/image?path=${encodeURIComponent(join(directory, 'passwd.bin'))}&index=0`,
+    )
+    assert.equal(notABook.payload.ok, false)
+    assert.match(notABook.payload.error, /unsupported book format/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('an unpacked EPUB is listed as a book, not offered as a directory', async () => {

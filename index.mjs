@@ -18,7 +18,7 @@ import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promi
 import { homedir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 
-import { BOOK_EXTENSIONS, loadBook, paragraphWindow, publicBook } from './lib/book.mjs'
+import { BOOK_EXTENSIONS, bookImage, loadBook, paragraphWindow, publicBook } from './lib/book.mjs'
 
 export const name = 'dsh-read'
 
@@ -414,6 +414,28 @@ export function apply(ctx) {
       const from = Number(params.get('from') ?? 0)
       const count = Number(params.get('count') ?? 30)
       return { ok: true, path: entry.path, ...paragraphWindow(entry, from, count) }
+    })
+
+    // One illustration. Addressed by book + index rather than by path, so the only bytes
+    // reachable here are the ones the book's own package declared — this is not a file
+    // server, and a caller cannot aim it at an arbitrary path.
+    register(`${API_PREFIX}/image`, async (req, res) => {
+      const params = parameters(req)
+      const entry = await loadBook(await requireBookPath(params.get('path')))
+      const index = Number(params.get('index'))
+      if (!Number.isInteger(index) || index < 0) throw new Error('missing image index')
+
+      const asset = await bookImage(entry, index)
+      if (!asset) throw new Error(`no image at index ${index}`)
+
+      res.writeHead(200, {
+        'content-type': asset.mediaType,
+        'content-length': String(asset.bytes.length),
+        // Bytes for a fixed index never change, so this is safe to cache hard.
+        'cache-control': 'private, max-age=86400, immutable',
+      })
+      res.end(asset.bytes)
+      return undefined
     })
 
     register(`${API_PREFIX}/progress`, async (req) => {
