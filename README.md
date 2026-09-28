@@ -73,12 +73,17 @@ Open **设置** at the foot of the sidebar, then pick **阅读中心** — the r
 rather than the shell's generic gear. It lives here instead of as a tab beside 对话 / 轨迹, so the
 conversation header stays down to the two views that belong to a session.
 
-- The directory bar starts at your library root. Type any absolute path and press 加载 to
-  switch — that directory becomes the primary library root and is remembered.
+- The directory bar shows the library root the plugin remembers, and it is refilled every time
+  the page opens. Type any absolute path and press 加载 to switch — that directory becomes the
+  primary library root and is remembered from then on.
 - Subdirectories are listed first, so you can walk down to where your books live.
 - Every book shows its format, size and progress (`已读 5.9% · 第 124 / 2083 段`, or 未开始).
 - **开始阅读 / 继续阅读** runs the same `/read` command in the session the shell currently has
   selected, then closes settings so you land on the card, resuming from the saved paragraph.
+- **设置进度** opens a slider under the book so you can move its position anywhere — for a book
+  you already read on paper, or one you want to skip around in. The label tracks the exact
+  paragraph and percentage while you drag. A book that was never opened has no paragraph count
+  yet, so the page parses it first and then shows the slider.
 - **重置进度** clears one book's position.
 
 ### The /read command

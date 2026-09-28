@@ -228,6 +228,7 @@ test('unrelated commands are ignored, and an unsettled /read draws nothing', () 
 function createReact() {
   const slots = []
   const setters = []
+  const refs = []
   let cursor = 0
 
   const React = {
@@ -243,7 +244,14 @@ function createReact() {
       }
       return [slots[slot], setters[slot]]
     },
-    useRef: (initial) => ({ current: initial }),
+    // Real refs persist across renders and keep their identity; a fresh object per
+    // render would silently hide any behaviour that depends on that.
+    useRef: (initial) => {
+      const slot = cursor
+      cursor += 1
+      if (!(slot in refs)) refs[slot] = { current: initial }
+      return refs[slot]
+    },
     // Effects are deliberately inert: the card's data loading is not under test.
     useEffect: () => {},
   }
@@ -471,6 +479,166 @@ function seedBooks(react, section, props) {
   ])
   return react.render(section, props)
 }
+
+/** The directory field, which the harness identifies by its placeholder. */
+function directoryField(tree) {
+  return elements(tree).find(
+    (element) => element.type === 'input' && element.props.className === 'dshReadLibInput',
+  )
+}
+
+test('重新打开设置页时，输入框回填已记住的目录，而不是留空', async () => {
+  const { react, section, props } = settingsPage({
+    fetch: async () => ({
+      status: 200,
+      json: async () => ({
+        ok: true,
+        dir: '/Users/me/Books',
+        parent: '/Users/me',
+        directories: [],
+        books: [],
+      }),
+    }),
+  })
+
+  // First paint: the listing has not landed yet, so the field is still empty.
+  assert.equal(directoryField(react.render(section, props)).props.value, '')
+
+  // Clicking 加载 is how the harness drives the otherwise-inert listing effect.
+  await labeledButton(react.render(section, props), '加载').props.onClick()
+
+  // The regression this guards: the remembered directory must settle into the field,
+  // otherwise reopening the page looks like the choice was lost.
+  assert.equal(directoryField(react.render(section, props)).props.value, '/Users/me/Books')
+})
+
+test('回填不会覆盖用户正在输入的目录', async () => {
+  // A listing that is still in flight while the user starts typing.
+  let release
+  const pending = new Promise((resolve) => {
+    release = resolve
+  })
+  const { react, section, props } = settingsPage({
+    fetch: async () => {
+      await pending
+      return {
+        status: 200,
+        json: async () => ({
+          ok: true,
+          dir: '/Users/me/Books',
+          parent: '/Users/me',
+          directories: [],
+          books: [],
+        }),
+      }
+    },
+  })
+
+  let tree = react.render(section, props)
+  const inflight = labeledButton(tree, '加载').props.onClick()
+
+  // The user types while that request is still open.
+  directoryField(tree).props.onChange({ target: { value: '/Volumes/library' } })
+  tree = react.render(section, props)
+  assert.equal(directoryField(tree).props.value, '/Volumes/library')
+
+  release()
+  await inflight
+  tree = react.render(section, props)
+
+  // The late reply must not clobber what the user typed.
+  assert.equal(directoryField(tree).props.value, '/Volumes/library')
+})
+
+test('设置进度：滑杆保存的是拖到的段落，而不是原地不动', async () => {
+  const calls = []
+  const { react, section, props } = settingsPage({
+    session: 'session-9',
+    fetch: async (url, options) => {
+      calls.push({ url, options })
+      return {
+        status: 200,
+        json: async () => ({
+          ok: true,
+          dir: '/books',
+          parent: '/',
+          directories: [],
+          books: [
+            {
+              path: '/books/活着.epub',
+              name: '活着.epub',
+              extension: 'epub',
+              size: 1024,
+              // Half-read, so the scrubber has a paragraph count to work from.
+              progress: { index: 100, paragraphCount: 2083, chars: 96487, percent: 4.8, at: 1 },
+            },
+          ],
+        }),
+      }
+    },
+  })
+
+  let tree = react.render(section, props)
+  await labeledButton(tree, '加载').props.onClick()
+  tree = react.render(section, props)
+
+  await labeledButton(tree, '设置进度').props.onClick()
+  tree = react.render(section, props)
+
+  const slider = elements(tree).find(
+    (element) => element.props.className === 'dshReadLibEditorSlider',
+  )
+  assert.ok(slider, '设置进度 应该展开一个滑杆')
+  assert.equal(slider.props.max, '2083', '滑杆上界是这本书的段落总数')
+  assert.equal(slider.props.value, '100', '滑杆从当前进度起步')
+
+  slider.props.onChange({ target: { value: '900' } })
+  tree = react.render(section, props)
+  assert.match(textOf(tree), /第 901 \/ 2083 段/)
+
+  const before = calls.length
+  await labeledButton(tree, '保存').props.onClick()
+
+  const saved = calls.slice(before).find((call) => call.url === '/dsh-read/api/progress')
+  assert.ok(saved, '保存应该写入进度')
+  assert.deepEqual(JSON.parse(saved.options.body), {
+    path: '/books/活着.epub',
+    name: '活着.epub',
+    index: 900,
+    chars: 96487,
+  })
+})
+
+test('设置进度：从未读过的书先去问 host 要段落总数', async () => {
+  const calls = []
+  const { react, section, props } = settingsPage({
+    fetch: async (url) => {
+      calls.push(url)
+      if (url.startsWith('/dsh-read/api/open')) {
+        return {
+          status: 200,
+          json: async () => ({ ok: true, book: { path: '/books/新书.epub', paragraphCount: 500 } }),
+        }
+      }
+      return { status: 200, json: async () => ({ ok: true }) }
+    },
+  })
+
+  // No saved progress: exactly the "already read it on paper" case.
+  let tree = seedBooks(react, section, props)
+  await labeledButton(tree, '设置进度').props.onClick()
+  tree = react.render(section, props)
+
+  assert.ok(
+    calls.some((url) => url.startsWith('/dsh-read/api/open')),
+    '没有进度记录的书必须先去解析段落总数',
+  )
+  const slider = elements(tree).find(
+    (element) => element.props.className === 'dshReadLibEditorSlider',
+  )
+  assert.equal(slider.props.max, '500')
+  assert.equal(slider.props.value, '0', '新书从第 1 段起步')
+})
 
 test('「阅读」设置页把书交给当前会话，然后退出设置', async () => {
   const calls = []
