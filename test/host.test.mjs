@@ -180,6 +180,28 @@ function fixtureEpub(title = 'Host Fixture') {
   ])
 }
 
+/** The same book, unpacked on disk — the shape iBooks and several converters leave behind. */
+async function writeUnpackedEpub(directory, title = 'Unpacked Fixture') {
+  const prose = `${'A'.repeat(40)} the keeper wrote the same sentence twice and meant it. ${'B'.repeat(40)}`
+  await mkdir(join(directory, 'META-INF'), { recursive: true })
+  await writeFile(
+    join(directory, 'META-INF', 'container.xml'),
+    '<?xml version="1.0"?><container><rootfiles>' +
+      '<rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+  )
+  await writeFile(
+    join(directory, 'content.opf'),
+    `<package><metadata><dc:title>${title}</dc:title></metadata><manifest>` +
+      '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>' +
+      '</manifest><spine><itemref idref="c1"/></spine></package>',
+  )
+  await writeFile(
+    join(directory, 'ch1.xhtml'),
+    `<html><body><h1>\u7b2c\u4e00\u7ae0</h1><p>${prose}</p></body></html>`,
+  )
+  return directory
+}
+
 /* ── tests ───────────────────────────────────────────────────────────────── */
 
 test('apply survives a strict cordis context that only exposes declared services', async () => {
@@ -455,6 +477,81 @@ test('一个会话都没有时，开始阅读提示先开一个会话', async ()
   assert.equal(started.payload.ok, false)
   assert.match(started.payload.error, /没有运行中的会话/)
   assert.equal(executed.length, 0)
+})
+
+test('an unpacked EPUB is listed as a book, not offered as a directory', async () => {
+  // The reported case: a book that is really a folder full of OCF files. It must appear in
+  // the book list, because descending into it yields nothing a reader can open.
+  const library = await mkdtemp(join(tmpdir(), 'dsh-read-unpacked-'))
+  try {
+    await writeUnpackedEpub(join(library, '1913.epub'))
+    await mkdir(join(library, 'ordinary-folder'), { recursive: true })
+
+    const { routes } = mount()
+    const listing = await request(routes, `/dsh-read/api/library?dir=${encodeURIComponent(library)}`)
+
+    assert.deepEqual(
+      listing.payload.books.map((book) => book.name),
+      ['1913.epub'],
+      'an unpacked EPUB belongs in the book list',
+    )
+    assert.deepEqual(
+      listing.payload.directories.map((entry) => entry.name),
+      ['ordinary-folder'],
+      'a real folder must still be navigable',
+    )
+  } finally {
+    await rm(library, { recursive: true, force: true })
+  }
+})
+
+test('/read opens an unpacked EPUB directory and refuses an unrelated folder', async () => {
+  const library = await mkdtemp(join(tmpdir(), 'dsh-read-unpacked-read-'))
+  try {
+    const bookPath = join(library, '1913.epub')
+    await writeUnpackedEpub(bookPath, 'Unpacked Book')
+
+    const { commands } = mount()
+    const result = await runCommand(commands, 'read', bookPath)
+
+    assert.equal(result.kind, 'success')
+    const book = JSON.parse(result.text)
+    assert.equal(book.title, 'Unpacked Book')
+    assert.equal(book.format, 'epub-unpacked')
+    assert.equal(book.paragraphCount >= 2, true)
+    assert.equal(book.chapters[0].title, '\u7b2c\u4e00\u7ae0')
+
+    // A directory without the OCF marker is still not a book.
+    const plain = join(library, 'just-a-folder')
+    await mkdir(plain, { recursive: true })
+    const refused = await runCommand(commands, 'read', plain)
+    assert.equal(refused.kind, 'error')
+    assert.match(refused.text, /unsupported book format|not a file/)
+  } finally {
+    await rm(library, { recursive: true, force: true })
+  }
+})
+
+test('the reader API pages through an unpacked EPUB too', async () => {
+  const library = await mkdtemp(join(tmpdir(), 'dsh-read-unpacked-api-'))
+  try {
+    const bookPath = join(library, '1913.epub')
+    await writeUnpackedEpub(bookPath)
+    const { routes } = mount()
+
+    const opened = await request(routes, `/dsh-read/api/open?path=${encodeURIComponent(bookPath)}`)
+    assert.equal(opened.payload.ok, true)
+    assert.equal(opened.payload.book.format, 'epub-unpacked')
+
+    const page = await request(
+      routes,
+      `/dsh-read/api/paragraphs?path=${encodeURIComponent(bookPath)}&from=0&count=10`,
+    )
+    assert.equal(page.payload.ok, true)
+    assert.equal(page.payload.items[0].text, '\u7b2c\u4e00\u7ae0')
+  } finally {
+    await rm(library, { recursive: true, force: true })
+  }
 })
 
 test('the reader API parses books, pages paragraphs, and refuses non-books', async () => {

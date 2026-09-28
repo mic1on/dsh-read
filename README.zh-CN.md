@@ -113,6 +113,7 @@ bundle 是在启动时合成的，光刷新页面不够。
 | 格式 | 解析方式 | 说明 |
 | --- | --- | --- |
 | `.epub` | OCF/ZIP 中央目录 → OPF manifest 与 spine → XHTML | 跳过 `linear="no"` 的 spine 项；图片、字体、CSS 一律不解压 |
+| 解压后的 `.epub` | 同一套 OCF 包，直接从磁盘读 | 用于 iBooks 及部分转换器留下的「书是一个文件夹」形态——靠 `META-INF/container.xml` 识别，列为书籍而不是目录 |
 | `.mobi` | PalmDB 记录表 → PalmDOC LZ77 | 支持不压缩与 PalmDOC 两种压缩 |
 | `.azw3` / `.azw` | 与 `.mobi` 相同，取 MOBI-7 正文 | 纯 KF8 文件会拒绝并提示转换 |
 | `.txt`、`.md`、`.markdown`、`.text`、`.log` | 编码嗅探 | UTF-8、UTF-16、GB18030/GBK、Big5、Shift-JIS |

@@ -146,13 +146,13 @@ async function resolveBookArgument(input) {
   // whitelist the HTTP API enforces — the command must not become a way to read
   // arbitrary files into the transcript.
   if (expanded.startsWith('/') || expanded.startsWith('./') || expanded.startsWith('../')) {
-    return requireBookPath(expanded)
+    return await requireBookPath(expanded)
   }
 
   // A bare file name may be something the user is standing right next to.
   if (BOOK_EXTENSIONS.includes(extname(expanded).toLowerCase())) {
     const nearby = await stat(resolve(expanded)).catch(() => null)
-    if (nearby?.isFile()) return requireBookPath(expanded)
+    if (nearby?.isFile()) return await requireBookPath(expanded)
   }
 
   const { books, roots } = await searchBooks({ query: argument })
@@ -167,7 +167,7 @@ async function resolveBookArgument(input) {
     const candidates = books.slice(0, 6).map((book) => book.path).join('\n')
     throw new Error(`找到 ${books.length} 本匹配的书，请用完整路径再试一次：\n${candidates}`)
   }
-  return requireBookPath(books[0].path)
+  return await requireBookPath(books[0].path)
 }
 
 /* ── routes ──────────────────────────────────────────────────────────────── */
@@ -203,10 +203,29 @@ async function readJsonBody(req) {
   return raw ? JSON.parse(raw) : {}
 }
 
+/**
+ * Whether a directory is really an unpacked EPUB rather than a folder to descend into.
+ *
+ * The OCF marker is cheap to test and unambiguous: a book directory carries
+ * `META-INF/container.xml` next to its package document. Checking it here keeps the
+ * library listing honest — such an entry is a book, not a subdirectory.
+ */
+async function isUnpackedEpub(directory) {
+  const info = await stat(join(directory, 'META-INF', 'container.xml')).catch(() => null)
+  return Boolean(info?.isFile())
+}
+
+/** A readable book: a file with a known extension, or an unpacked EPUB directory. */
+async function isReadableBook(target) {
+  if (BOOK_EXTENSIONS.includes(extname(target).toLowerCase())) return true
+  return isUnpackedEpub(target)
+}
+
 /** The one place a caller-supplied path becomes a readable file. */
-function requireBookPath(value) {
+async function requireBookPath(value) {
   if (!value) throw new Error('missing book path')
   const target = resolve(value)
+  if (await isReadableBook(target)) return target
   if (!BOOK_EXTENSIONS.includes(extname(target).toLowerCase())) {
     throw new Error(`unsupported book format: ${extname(target) || '(none)'}`)
   }
@@ -282,10 +301,15 @@ async function libraryListing(requested) {
     if (entry.name.startsWith('.')) continue
     const full = join(target, entry.name)
     if (entry.isDirectory()) {
-      directories.push({ name: entry.name, path: full })
+      // An unpacked EPUB is a book that happens to be a directory, so it belongs in the
+      // book list rather than being offered as somewhere to descend into.
+      if (!(await isUnpackedEpub(full))) {
+        directories.push({ name: entry.name, path: full })
+        continue
+      }
+    } else if (!entry.isFile() || !isBookFile(entry.name)) {
       continue
     }
-    if (!entry.isFile() || !isBookFile(entry.name)) continue
 
     const fileInfo = await stat(full).catch(() => null)
     const record = saved[full]
@@ -380,13 +404,13 @@ export function apply(ctx) {
     }
 
     register(`${API_PREFIX}/open`, async (req) => {
-      const entry = await loadBook(requireBookPath(parameters(req).get('path')))
+      const entry = await loadBook(await requireBookPath(parameters(req).get('path')))
       return { ok: true, book: publicBook(entry) }
     })
 
     register(`${API_PREFIX}/paragraphs`, async (req) => {
       const params = parameters(req)
-      const entry = await loadBook(requireBookPath(params.get('path')))
+      const entry = await loadBook(await requireBookPath(params.get('path')))
       const from = Number(params.get('from') ?? 0)
       const count = Number(params.get('count') ?? 30)
       return { ok: true, path: entry.path, ...paragraphWindow(entry, from, count) }
@@ -395,7 +419,7 @@ export function apply(ctx) {
     register(`${API_PREFIX}/progress`, async (req) => {
       if (req.method === 'POST') {
         const body = await readJsonBody(req)
-        const target = requireBookPath(body.path)
+        const target = await requireBookPath(body.path)
         await writeProgressEntry({ ...body, path: target })
         return { ok: true }
       }
@@ -420,7 +444,7 @@ export function apply(ctx) {
     // we fall back to the only live agent, and refuse to guess when several are running.
     register(`${API_PREFIX}/start`, async (req) => {
       const body = await readJsonBody(req)
-      const target = requireBookPath(body.path)
+      const target = await requireBookPath(body.path)
       let sessionId = String(body.sessionId ?? '')
 
       if (!sessionId) {

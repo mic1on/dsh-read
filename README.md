@@ -120,6 +120,7 @@ Or just ask the agent in natural language — it can call `book_search` and hand
 | Format | How it is read | Notes |
 | --- | --- | --- |
 | `.epub` | OCF/ZIP central directory → OPF manifest and spine → XHTML | Non-linear spine items are skipped; images, fonts and CSS are never inflated |
+| unpacked `.epub` | The same OCF package read straight off disk | For books iBooks and some converters leave as a folder — recognised by `META-INF/container.xml` and listed as a book, not a directory |
 | `.mobi` | PalmDB record table → PalmDOC LZ77 | Uncompressed and PalmDOC compression |
 | `.azw3` / `.azw` | Same as `.mobi`, for the MOBI-7 text part | KF8-only files are rejected with a conversion hint |
 | `.txt`, `.md`, `.markdown`, `.text`, `.log` | Encoding sniffing | UTF-8, UTF-16, GB18030/GBK, Big5, Shift-JIS |
