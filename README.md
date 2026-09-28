@@ -45,15 +45,25 @@ You  ▸ /read ~/Books/三体.epub
 
 ## Install
 
+`dsh plugin add` is a thin pnpm forwarder, so it accepts any pnpm specifier — including a
+GitHub repo. Nothing needs to be published to npm first:
+
 ```bash
-# from npm (once published)
-dsh plugin --profile web add dsh-read
+# straight from GitHub
+dsh plugin --profile web add github:mic1on/dsh-read
+
+# pinned to a tag, for a reproducible install
+dsh plugin --profile web add github:mic1on/dsh-read#v0.1.0
 
 # from a local checkout
 dsh plugin --profile web add -w link:/path/to/dsh-read
 ```
 
-Use the profile you actually run (`web` for the browser GUI), then reload the GUI.
+Use the profile you actually run (`web` for the browser GUI), then **restart DSH**. The
+client bundle is composed at boot, so reloading the page is not enough.
+
+There is no build step and no `prepare` script: everything the plugin needs ships as source,
+so a git install works as-is.
 
 ## Usage
 

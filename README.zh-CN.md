@@ -42,15 +42,25 @@
 
 ## 安装
 
+`dsh plugin add` 本质是 pnpm 的薄转发器，接受任何 pnpm 来源说明符——包括 GitHub 仓库。
+不需要先发布到 npm：
+
 ```bash
-# 已发布到 npm 后
-dsh plugin --profile web add dsh-read
+# 直接从 GitHub 安装
+dsh plugin --profile web add github:mic1on/dsh-read
+
+# 锁定到某个 tag，便于复现
+dsh plugin --profile web add github:mic1on/dsh-read#v0.1.0
 
 # 本地开发目录（软链）
 dsh plugin --profile web add -w link:/path/to/dsh-read
 ```
 
-`--profile` 用你实际在跑的 profile（浏览器界面一般是 `web`），然后刷新界面。
+`--profile` 用你实际在跑的 profile（浏览器界面一般是 `web`），然后**重启 DSH**。浏览器端的
+bundle 是在启动时合成的，光刷新页面不够。
+
+本项目没有构建步骤、也没有 `prepare` 脚本：插件需要的一切都以源码形式随包发布，所以 git 安装
+可以直接用。
 
 ## 使用
 
