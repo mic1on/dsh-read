@@ -25,6 +25,10 @@ You  ▸ /read ~/Books/三体.epub
 
 - **In the conversation, not beside it.** The reader is a real Chat node in the transcript,
   rendered in the turn flow where you typed `/read`.
+- **A fixed reading area.** The card claims the conversation viewport rather than growing with
+  the text, so the transcript never reflows as paragraphs arrive and the prose scrolls inside
+  the card. It tracks a resized window and a changing composer height by reading the two CSS
+  variables DSH already publishes from the conversation scroll container.
 - **Streams like a reply.** Paragraphs are revealed character by character, with a caret on
   the active one.
 - **Speed, pause, seek.** 慢 / 中 / 快 presets (10 / 20 / 60 字/秒), and a 自定义 slider from 10 to

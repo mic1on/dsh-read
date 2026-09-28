@@ -319,6 +319,56 @@ const CARD_BOOK = {
   chapters: [],
 }
 
+/** The bundled stylesheet, which is the only place the card's geometry is expressed. */
+function stylesheet() {
+  const match = /const CSS = `([\s\S]*?)\n`/.exec(SOURCE)
+  assert.ok(match, 'the bundle must carry one CSS template')
+  return match[1]
+}
+
+test('the reader fills the conversation viewport instead of growing with the text', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const tree = react.render(card, { node: { data: { book: CARD_BOOK, error: '' } } })
+
+  // The card is the element that owns the height; a growing card would reflow the whole
+  // transcript on every paragraph.
+  assert.equal(tree.props['data-fill'], 'true', 'reading card should claim the viewport')
+
+  const css = stylesheet()
+  const fill = /\.dshReadCard\[data-fill="true"\]\{([^}]*)\}/.exec(css)
+  assert.ok(fill, 'expected a data-fill height rule')
+  // DSH publishes both variables from the conversation scroll container, so the card can
+  // track a resized window without measuring anything itself.
+  assert.match(fill[1], /--dsh-conversation-viewport-height/)
+  assert.match(fill[1], /--dsh-composer-height/)
+  assert.match(fill[1], /max\(240px,/, 'a very short window still needs a usable card')
+
+  // Only the prose may flex; otherwise the chrome would be squashed into the fixed card.
+  assert.match(css, /\.dshReadCard>\*\{flex:none\}/)
+  assert.match(css, /\.dshReadStream\{flex:1;min-height:0;overflow:auto/)
+  assert.doesNotMatch(css, /\.dshReadStream\{max-height:/, 'the stream must fill, not cap')
+
+  // Ordering is load-bearing: equal specificity means the later flex:1 must win.
+  assert.ok(
+    css.indexOf('.dshReadCard>*{flex:none}') < css.indexOf('.dshReadStream{flex:1'),
+    'the stream rule must come after the blanket flex:none',
+  )
+})
+
+test('an error card stays compact rather than filling the viewport with one line', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const tree = react.render(card, {
+    node: { data: { book: null, error: 'file not found: /nope.epub' } },
+  })
+
+  assert.equal(tree.props['data-fill'], undefined)
+  assert.match(textOf(tree), /file not found/)
+})
+
 test('speed is picked by preset, and the slider exists only in 自定义 mode', () => {
   const react = createReact()
   const { registered } = mount(react.React)
