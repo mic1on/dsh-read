@@ -31,6 +31,7 @@ const API_PREFIX = '/dsh-read/api'
 const DATA_DIRECTORY = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-read')
 const PROGRESS_FILE = join(DATA_DIRECTORY, 'progress.json')
 const CONFIG_FILE = join(DATA_DIRECTORY, 'config.json')
+const NOTES_FILE = join(DATA_DIRECTORY, 'notes.json')
 const PROGRESS_LIMIT = 300
 
 /** Where `/read <keyword>` and `book_search` look when nothing is configured. */
@@ -256,6 +257,50 @@ async function writeProgressEntry(entry) {
   return progress
 }
 
+/* ── annotations (伴读: questions asked and notes kept while reading) ─────── */
+
+/**
+ * One book's annotations, oldest first.
+ *
+ * Deliberately *not* stored in the session log. Asking about a passage inserts a normal user
+ * message, so the conversation already carries the exchange; keeping a second copy there
+ * would scatter hundreds of fragments through the transcript and bury it. This file is the
+ * reader's own index — "where was I confused" — and stays independent of any session.
+ */
+async function readNotes() {
+  const notes = await readJson(NOTES_FILE, {})
+  return notes && typeof notes === 'object' && !Array.isArray(notes) ? notes : {}
+}
+
+const NOTE_LIMIT = 2000
+
+/** Append one annotation, returning it with its assigned id. */
+async function addNote(entry) {
+  const notes = await readNotes()
+  const forBook = Array.isArray(notes[entry.path]) ? notes[entry.path] : []
+  const note = {
+    id: `${Date.now().toString(36)}-${(forBook.length + 1).toString(36)}`,
+    paragraph: Number.isFinite(entry.paragraph) ? Math.max(0, Math.floor(entry.paragraph)) : 0,
+    quote: String(entry.quote ?? '').slice(0, 400),
+    kind: entry.kind === 'note' ? 'note' : 'question',
+    text: String(entry.text ?? '').slice(0, 2000),
+    createdAt: Date.now(),
+  }
+  forBook.push(note)
+  // Keep the newest per book; a reader cannot use an unbounded list anyway.
+  notes[entry.path] = forBook.slice(-NOTE_LIMIT)
+  await writeJson(NOTES_FILE, notes)
+  return note
+}
+
+async function removeNote(bookPath, id) {
+  const notes = await readNotes()
+  const forBook = Array.isArray(notes[bookPath]) ? notes[bookPath] : []
+  notes[bookPath] = forBook.filter((note) => note.id !== id)
+  await writeJson(NOTES_FILE, notes)
+  return notes[bookPath]
+}
+
 /* ── library (the 阅读 tab's data) ───────────────────────────────────────── */
 
 /** The directory the 阅读 tab browses: the primary root, or the home directory. */
@@ -436,6 +481,25 @@ export function apply(ctx) {
       })
       res.end(asset.bytes)
       return undefined
+    })
+
+    // Annotations for one book, or for every book when no path is given (the reading
+    // centre lists them across the library).
+    register(`${API_PREFIX}/notes`, async (req) => {
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req)
+        if (body.remove) {
+          const target = await requireBookPath(body.path)
+          return { ok: true, notes: await removeNote(target, String(body.remove)) }
+        }
+        const target = await requireBookPath(body.path)
+        const note = await addNote({ ...body, path: target })
+        return { ok: true, note }
+      }
+      const requested = parameters(req).get('path')
+      const notes = await readNotes()
+      if (!requested) return { ok: true, notes }
+      return { ok: true, notes: notes[resolve(requested)] ?? [] }
     })
 
     register(`${API_PREFIX}/progress`, async (req) => {

@@ -354,12 +354,17 @@ test('the reader fills the conversation viewport instead of growing with the tex
 
   // Only the prose may flex; otherwise the chrome would be squashed into the fixed card.
   assert.match(css, /\.dshReadCard>\*\{flex:none\}/)
-  assert.match(css, /\.dshReadStream\{flex:1;min-height:0;overflow:auto/)
-  assert.doesNotMatch(css, /\.dshReadStream\{max-height:/, 'the stream must fill, not cap')
+  // Property presence rather than an exact prefix: the rule also anchors the ask bubble.
+  const stream = /\.dshReadStream\{([^}]*)\}/.exec(css)
+  assert.ok(stream, 'expected a .dshReadStream rule')
+  assert.match(stream[1], /flex:1/)
+  assert.match(stream[1], /min-height:0/)
+  assert.match(stream[1], /overflow:auto/)
+  assert.doesNotMatch(stream[1], /max-height:/, 'the stream must fill, not cap')
 
   // Ordering is load-bearing: equal specificity means the later flex:1 must win.
   assert.ok(
-    css.indexOf('.dshReadCard>*{flex:none}') < css.indexOf('.dshReadStream{flex:1'),
+    css.indexOf('.dshReadCard>*{flex:none}') < css.indexOf('.dshReadStream{'),
     'the stream rule must come after the blanket flex:none',
   )
 })
@@ -465,6 +470,157 @@ test('a jump starts a fresh run rather than splicing unrelated paragraphs', () =
   const first = mergeWindow({ from: 0, items: [] }, run(120, 60), 'append')
   assert.equal(first.from, 120)
   assert.equal(first.items.length, 60)
+})
+
+/** A minimal DOM-ish selection, as window.getSelection() would report it. */
+function fakeSelection(text, paragraph, { spansParagraphs = false, inProse = true } = {}) {
+  const block = {
+    getAttribute: (name) => (name === 'data-paragraph' ? String(paragraph) : null),
+    // A quote that starts in one paragraph and ends in another cannot be attributed.
+    contains: () => !spansParagraphs,
+  }
+  const host = {
+    closest: (selector) => (inProse && selector === '[data-paragraph]' ? block : null),
+    nodeType: 1,
+  }
+  const range = {
+    startContainer: host,
+    endContainer: host,
+    getBoundingClientRect: () => ({ top: 10, bottom: 30, left: 40, right: 120 }),
+  }
+  return {
+    isCollapsed: text.length === 0,
+    rangeCount: 1,
+    toString: () => text,
+    getRangeAt: () => range,
+    removeAllRanges() {
+      this.cleared = true
+    },
+  }
+}
+
+/** Render the card with a window stub whose selection we control. */
+function cardWithSelection(text, paragraph, options) {
+  const selection = fakeSelection(text, paragraph, options)
+  const react = createReact()
+  // `globals` replaces a whole sandbox key, and `loadBundle` owns `window` for the
+  // ModuleLoader stub — so the selection is hung off `globalThis` instead, which the bundle
+  // reaches through the sandbox's own global object.
+  const { registered } = mount(react.React, { globals: { __dshReadSelection: selection } })
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  return { react, card, selection }
+}
+
+test('a selection inside a paragraph offers to ask, and lands in the composer', () => {
+  const drafts = []
+  const { react, card } = cardWithSelection('\u6211\u6bd4\u73b0\u5728\u5e74\u8f7b\u5341\u5c81', 121)
+  const props = {
+    node: { data: { book: CARD_BOOK, error: '' } },
+    inputActions: { setDraft: (text) => drafts.push(text) },
+  }
+
+  // The harness's effects are inert, so the loaded window is seeded directly: ReaderBody's
+  // slot 0 is `stream`.
+  let tree = react.render(card, props)
+  react.setters[0]({
+    from: 120,
+    items: [
+      { text: '\u524d\u4e00\u6bb5', offset: 120 },
+      { text: '\u6211\u6bd4\u73b0\u5728\u5e74\u8f7b\u5341\u5c81', offset: 124 },
+    ],
+  })
+  react.setters[1](121)
+  react.setters[2](999)
+  tree = react.render(card, props)
+
+  // The paragraph must carry the anchor a selection resolves against.
+  const block = elements(tree).find((element) => element.props['data-paragraph'] === '121')
+  assert.ok(block, 'paragraphs need a data-paragraph anchor')
+  assert.equal(block.props['data-noted'], 'false')
+
+  // Simulate the reader releasing the mouse over a selected passage.
+  const stream = elements(tree).find((element) =>
+    String(element.props.className || '').includes('dshReadStream'),
+  )
+  stream.props.onMouseUp()
+  tree = react.render(card, props)
+
+  const askButton = labeledButton(tree, '问 AI')
+  assert.ok(askButton, 'a selection should offer 问 AI')
+
+  askButton.props.onClick()
+  assert.equal(drafts.length, 1, 'asking must hand the question to the composer')
+  assert.match(drafts[0], /活着/, 'the draft should name the book')
+  assert.match(drafts[0], /第 122 段/, 'and the position, one-based')
+  assert.match(drafts[0], /\u6211\u6bd4\u73b0\u5728\u5e74\u8f7b\u5341\u5c81/, 'and quote the passage')
+  // It must not send: the reader decides when to submit.
+  assert.equal(drafts[0].endsWith('\n\n'), true, 'leave the caret on a fresh line for a follow-up')
+})
+
+test('a collapsed selection, or one outside the prose, offers nothing', () => {
+  const { react, card } = cardWithSelection('', 0)
+  const props = { node: { data: { book: CARD_BOOK, error: '' } }, inputActions: {} }
+  let tree = react.render(card, props)
+  const stream = elements(tree).find((element) =>
+    String(element.props.className || '').includes('dshReadStream'),
+  )
+  stream.props.onMouseUp()
+  tree = react.render(card, props)
+  assert.equal(labeledButton(tree, '问 AI'), undefined, 'an empty selection is not a question')
+})
+
+/** Render the card with a seeded window, then fire the selection handler. */
+function renderWithSelection(text, paragraph, options) {
+  const { react, card, selection } = cardWithSelection(text, paragraph, options)
+  const props = { node: { data: { book: CARD_BOOK, error: '' } }, inputActions: {} }
+  let tree = react.render(card, props)
+  react.setters[0]({
+    from: 120,
+    items: [
+      { text: '\u524d\u4e00\u6bb5', offset: 120 },
+      { text: '\u6211\u6bd4\u73b0\u5728\u5e74\u8f7b\u5341\u5c81', offset: 124 },
+    ],
+  })
+  react.setters[1](121)
+  react.setters[2](999)
+  tree = react.render(card, props)
+  const stream = elements(tree).find((element) =>
+    String(element.props.className || '').includes('dshReadStream'),
+  )
+  stream.props.onMouseUp()
+  return { react, card, props, selection, tree: react.render(card, props) }
+}
+
+test('a quote spanning two paragraphs is not offered, since it has no single home', () => {
+  const { tree } = renderWithSelection('crossing a boundary', 121, { spansParagraphs: true })
+  assert.equal(
+    labeledButton(tree, '问 AI'),
+    undefined,
+    'a selection with no single paragraph cannot be attributed, so it must not be offered',
+  )
+})
+
+test('a selection outside the prose offers nothing', () => {
+  const { tree } = renderWithSelection('somewhere else', 121, { inProse: false })
+  assert.equal(labeledButton(tree, '问 AI'), undefined)
+})
+
+test('a whitespace-only selection is not a question', () => {
+  const { tree } = renderWithSelection('   \n  ', 121)
+  assert.equal(labeledButton(tree, '问 AI'), undefined, 'whitespace is not a passage')
+})
+
+test('asking without a session input facade must not throw', () => {
+  // A container may mount the reader with no composer to talk to.
+  const { react, card } = cardWithSelection('some passage', 7)
+  const props = { node: { data: { book: CARD_BOOK, error: '' } }, inputActions: undefined }
+  let tree = react.render(card, props)
+  const stream = elements(tree).find((element) =>
+    String(element.props.className || '').includes('dshReadStream'),
+  )
+  stream.props.onMouseUp()
+  tree = react.render(card, props)
+  assert.doesNotThrow(() => labeledButton(tree, '问 AI').props.onClick())
 })
 
 test('space toggles playback, and is advertised on the card', () => {

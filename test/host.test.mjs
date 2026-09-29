@@ -269,6 +269,7 @@ test('host plugin exports its cordis name, mounts routes late, and registers /re
   assert.deepEqual([...routes.keys()].sort(), [
     '/dsh-read/api/image',
     '/dsh-read/api/library',
+    '/dsh-read/api/notes',
     '/dsh-read/api/open',
     '/dsh-read/api/paragraphs',
     '/dsh-read/api/progress',
@@ -562,6 +563,89 @@ test('the image route serves declared plates and refuses everything else', async
     )
     assert.equal(notABook.payload.ok, false)
     assert.match(notABook.payload.error, /unsupported book format/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('annotations accumulate per book and can be removed', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-notes-'))
+  try {
+    const bookPath = join(directory, 'fixture.epub')
+    const otherPath = join(directory, 'other.epub')
+    await writeFile(bookPath, fixtureEpub())
+    await writeFile(otherPath, fixtureEpub('Other'))
+    const { routes } = mount()
+
+    const added = await request(routes, '/dsh-read/api/notes', {
+      method: 'POST',
+      body: {
+        path: bookPath,
+        paragraph: 124,
+        quote: '\u6211\u6bd4\u73b0\u5728\u5e74\u8f7b\u5341\u5c81',
+        kind: 'question',
+        text: '\u8fd9\u6bb5\u8bdd\u662f\u4ec0\u4e48\u610f\u601d\uff1f',
+      },
+    })
+    assert.equal(added.payload.ok, true)
+    assert.equal(added.payload.note.paragraph, 124)
+    assert.equal(added.payload.note.kind, 'question')
+    assert.ok(added.payload.note.id, 'every annotation needs an id to be removable')
+    assert.ok(added.payload.note.createdAt > 0)
+
+    // A second book must not share the first book's list.
+    await request(routes, '/dsh-read/api/notes', {
+      method: 'POST',
+      body: { path: otherPath, paragraph: 3, quote: 'x', kind: 'note', text: 'mine' },
+    })
+
+    const forBook = await request(
+      routes,
+      `/dsh-read/api/notes?path=${encodeURIComponent(bookPath)}`,
+    )
+    assert.equal(forBook.payload.notes.length, 1)
+    assert.equal(forBook.payload.notes[0].paragraph, 124)
+
+    // The library-wide view is what the reading centre lists.
+    const all = await request(routes, '/dsh-read/api/notes')
+    assert.equal(Object.keys(all.payload.notes).length, 2)
+
+    const removed = await request(routes, '/dsh-read/api/notes', {
+      method: 'POST',
+      body: { path: bookPath, remove: added.payload.note.id },
+    })
+    assert.equal(removed.payload.notes.length, 0)
+
+    const after = await request(routes, `/dsh-read/api/notes?path=${encodeURIComponent(bookPath)}`)
+    assert.equal(after.payload.notes.length, 0, 'the other book must survive the removal')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('an annotation is clamped, so a stray payload cannot grow without bound', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-notes-limit-'))
+  try {
+    const bookPath = join(directory, 'fixture.epub')
+    await writeFile(bookPath, fixtureEpub())
+    const { routes } = mount()
+
+    const added = await request(routes, '/dsh-read/api/notes', {
+      method: 'POST',
+      body: {
+        path: bookPath,
+        paragraph: -5,
+        quote: 'q'.repeat(5000),
+        kind: 'nonsense',
+        text: 't'.repeat(5000),
+      },
+    })
+
+    assert.equal(added.payload.note.paragraph, 0, 'a negative paragraph clamps to the start')
+    assert.equal(added.payload.note.quote.length, 400)
+    assert.equal(added.payload.note.text.length, 2000)
+    // An unknown kind falls back to question rather than being stored verbatim.
+    assert.equal(added.payload.note.kind, 'question')
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

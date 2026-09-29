@@ -36,6 +36,12 @@ own package declared.
 - **Space toggles playback.** Click the card once to focus it, then space plays and pauses.
 It is bound to the card rather than the window on purpose: the composer lives in the same
 document, so a global listener would turn every space you type into a pause.
+- **伴读：划词提问，留痕。** Select a passage and the reader offers 问 AI or 记一笔. 问 AI writes
+the question — book, paragraph and quote — into the composer, so you can add your own
+framing and send it yourself; 记一笔 records it without involving a session at all. Notes
+are stored per book under `$DSH_HOME/dsh-read/notes.json`, never in the transcript: asking
+about a passage already puts a message there, and a second copy would bury the conversation
+under hundreds of fragments.
 - **Scroll back through everything you have read.** The loaded run grows in both
 directions instead of being one page: scrolling up pulls in earlier paragraphs and keeps
 your place, so you can reach the start of the book.
