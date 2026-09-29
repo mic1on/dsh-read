@@ -386,6 +386,80 @@ function keyEvent(key, { target = {}, ...modifiers } = {}) {
   }
 }
 
+/** Build the contiguous run shape the card keeps in state. */
+function run(from, count) {
+  return {
+    from,
+    items: Array.from({ length: count }, (_, at) => ({ text: `p${from + at}`, offset: from + at })),
+  }
+}
+
+/** The plugin object, so pure helpers can be exercised directly. */
+function pluginExports() {
+  const [registration] = loadBundle()
+  return registration.factory(() => REACT_STUB)
+}
+
+test('scrolling back reaches earlier paragraphs instead of losing them', () => {
+  const { mergeWindow } = pluginExports()
+
+  // A forward page extends the run; it must not replace it, which is what used to make
+  // everything already read vanish as soon as the next page arrived.
+  let current = run(0, 60)
+  current = mergeWindow(current, run(60, 60), 'append')
+  assert.equal(current.from, 0)
+  assert.equal(current.items.length, 120, 'the earlier paragraphs must still be there')
+  assert.equal(current.items[0].text, 'p0')
+  assert.equal(current.items[119].text, 'p119')
+
+  // A backward page grows the run the other way and moves the origin down.
+  current = mergeWindow(current, run(0, 0), 'prepend') // non-adjacent: ignored
+  assert.equal(current.items.length, 120, 'a non-adjacent prepend must not merge')
+
+  const back = mergeWindow(run(60, 60), run(0, 60), 'prepend')
+  assert.equal(back.from, 0)
+  assert.equal(back.items.length, 120)
+  assert.equal(back.items[0].text, 'p0')
+  assert.equal(back.items[60].text, 'p60')
+
+  // Repeated appends keep growing rather than resetting.
+  let grown = run(0, 60)
+  for (const from of [60, 120, 180]) grown = mergeWindow(grown, run(from, 60), 'append')
+  assert.equal(grown.from, 0)
+  assert.equal(grown.items.length, 240)
+})
+
+test('the card renders the whole loaded run, not a fixed slice behind the cursor', () => {
+  // The harness cannot drive the async load path, so this asserts the one line that decides
+  // how much of the loaded run reaches the DOM. A fixed `local - N` slice would clip history
+  // even once the run itself is complete, which is exactly the reported symptom.
+  const start = SOURCE.indexOf('const blocks = []')
+  assert.ok(start > 0, 'expected the block render loop')
+  const loop = SOURCE.slice(start, start + 200)
+  assert.match(loop, /for \(let at = 0; at <= local; at \+= 1\)/, 'must start at the run origin')
+  assert.doesNotMatch(loop, /local - \d+/, 'must not clip a fixed window behind the cursor')
+})
+
+test('a jump starts a fresh run rather than splicing unrelated paragraphs', () => {
+  const { mergeWindow } = pluginExports()
+
+  // A chapter jump lands far away: merging would invent a run that never existed.
+  const jumped = mergeWindow(run(0, 60), run(900, 60), 'append')
+  assert.equal(jumped.from, 900)
+  assert.equal(jumped.items.length, 60)
+  assert.equal(jumped.items[0].text, 'p900')
+
+  // A gap must not be papered over even when the direction says "append".
+  const gapped = mergeWindow(run(0, 60), run(200, 60), 'append')
+  assert.equal(gapped.from, 200)
+  assert.equal(gapped.items.length, 60)
+
+  // The very first load has nothing to merge with.
+  const first = mergeWindow({ from: 0, items: [] }, run(120, 60), 'append')
+  assert.equal(first.from, 120)
+  assert.equal(first.items.length, 60)
+})
+
 test('space toggles playback, and is advertised on the card', () => {
   const react = createReact()
   const { registered } = mount(react.React)

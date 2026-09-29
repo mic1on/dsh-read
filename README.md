@@ -36,6 +36,9 @@ own package declared.
 - **Space toggles playback.** Click the card once to focus it, then space plays and pauses.
 It is bound to the card rather than the window on purpose: the composer lives in the same
 document, so a global listener would turn every space you type into a pause.
+- **Scroll back through everything you have read.** The loaded run grows in both
+directions instead of being one page: scrolling up pulls in earlier paragraphs and keeps
+your place, so you can reach the start of the book.
 - **Streams like a reply.** Paragraphs are revealed character by character, with a caret on
   the active one.
 - **Speed, pause, seek.** 慢 / 中 / 快 presets (10 / 20 / 60 字/秒), and a 自定义 slider from 10 to

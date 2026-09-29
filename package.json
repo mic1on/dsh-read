@@ -1,6 +1,6 @@
 {
   "name": "dsh-read",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "description": "Read local EPUB / MOBI / text books inside DeepSeek Harness: the /read command streams the text into the conversation like an AI reply, with speed control, pause and progress.",
   "license": "MIT",
