@@ -33,6 +33,9 @@ You  ▸ /read ~/Books/三体.epub
 it appears where the book put it and playback dwells on it instead of typing past it.
 Bytes are fetched by book + index, so the reader can only ever reach assets the book's
 own package declared.
+- **Space toggles playback.** Click the card once to focus it, then space plays and pauses.
+It is bound to the card rather than the window on purpose: the composer lives in the same
+document, so a global listener would turn every space you type into a pause.
 - **Streams like a reply.** Paragraphs are revealed character by character, with a caret on
   the active one.
 - **Speed, pause, seek.** 慢 / 中 / 快 presets (10 / 20 / 60 字/秒), and a 自定义 slider from 10 to
@@ -92,6 +95,7 @@ conversation header stays down to the two views that belong to a session.
   you already read on paper, or one you want to skip around in. The label tracks the exact
   paragraph and percentage while you drag. A book that was never opened has no paragraph count
   yet, so the page parses it first and then shows the slider.
+- **空格 暂停/继续** — click the card to focus it, then space toggles playback.
 - **重置进度** clears one book's position.
 
 ### The /read command

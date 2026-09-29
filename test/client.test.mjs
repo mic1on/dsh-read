@@ -369,6 +369,92 @@ test('an error card stays compact rather than filling the viewport with one line
   assert.match(textOf(tree), /file not found/)
 })
 
+/** A keyboard event as React would hand it to the card's handler. */
+function keyEvent(key, { target = {}, ...modifiers } = {}) {
+  return {
+    key,
+    target: { tagName: 'DIV', ...target },
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true
+    },
+    ...modifiers,
+  }
+}
+
+test('space toggles playback, and is advertised on the card', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const props = { node: { data: { book: CARD_BOOK, error: '' } } }
+
+  let tree = react.render(card, props)
+  // The card must be reachable by keyboard, or the shortcut could never fire.
+  assert.equal(tree.props.tabIndex, 0)
+  assert.equal(typeof tree.props.onKeyDown, 'function')
+  assert.match(textOf(tree), /空格 暂停\/继续/, 'the shortcut has to be discoverable')
+
+  // The card starts paused until its first window lands, so the first press starts playback.
+  const labelNow = () => (labeledButton(tree, '暂停') !== undefined ? '暂停' : '播放')
+  const before = labelNow()
+
+  let event = keyEvent(' ')
+  tree.props.onKeyDown(event)
+  tree = react.render(card, props)
+  assert.equal(event.defaultPrevented, true, 'space must not scroll the transcript')
+  assert.notEqual(labelNow(), before, 'space should have toggled playback')
+
+  // And pressing again returns to where it was.
+  event = keyEvent(' ')
+  tree.props.onKeyDown(event)
+  tree = react.render(card, props)
+  assert.equal(labelNow(), before, 'space should toggle back')
+})
+
+test('space is ignored when a control or the composer owns the keystroke', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const props = { node: { data: { book: CARD_BOOK, error: '' } } }
+
+  let tree = react.render(card, props)
+  const playingBefore = labeledButton(tree, '暂停') !== undefined
+
+  // A keystroke aimed at a form control belongs to that control: the composer sits in the
+  // same document, so swallowing its spaces would break typing.
+  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']) {
+    const event = keyEvent(' ', { target: { tagName } })
+    tree.props.onKeyDown(event)
+    assert.equal(event.defaultPrevented, false, `space aimed at <${tagName}> must pass through`)
+  }
+  const editable = keyEvent(' ', { target: { tagName: 'DIV', isContentEditable: true } })
+  tree.props.onKeyDown(editable)
+  assert.equal(editable.defaultPrevented, false, 'a contenteditable must keep its spaces')
+
+  // Modified combinations belong to the browser and the OS.
+  for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey']) {
+    const event = keyEvent(' ', { [modifier]: true })
+    tree.props.onKeyDown(event)
+    assert.equal(event.defaultPrevented, false, `space with ${modifier} must pass through`)
+  }
+
+  // Other keys are none of our business.
+  const letter = keyEvent('a')
+  tree.props.onKeyDown(letter)
+  assert.equal(letter.defaultPrevented, false)
+
+  tree = react.render(card, props)
+  assert.equal(
+    labeledButton(tree, '暂停') !== undefined,
+    playingBefore,
+    'none of those keystrokes may have toggled playback',
+  )
+})
+
 test('speed is picked by preset, and the slider exists only in 自定义 mode', () => {
   const react = createReact()
   const { registered } = mount(react.React)
