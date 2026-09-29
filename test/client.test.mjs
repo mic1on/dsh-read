@@ -232,7 +232,14 @@ function createReact() {
   let cursor = 0
 
   const React = {
-    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    // Function components render eagerly, the way React does. Without this a wrapper
+    // component would come back as an opaque element and every assertion about the tree
+    // would silently be about the wrapper instead of the UI.
+    createElement: (type, props, ...children) => {
+      const resolved = props || {}
+      if (typeof type === 'function') return type({ ...resolved, children })
+      return { type, props: resolved, children }
+    },
     useState: (initial) => {
       const slot = cursor
       cursor += 1
