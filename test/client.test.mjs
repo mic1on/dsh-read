@@ -832,14 +832,18 @@ test('the progress bar does not flash to 100% before the first window loads', ()
 /* ── the 阅读 settings page ──────────────────────────────────────────────── */
 
 /** Mount the plugin and hand back the 阅读 settings page with its owner + standard props. */
-function settingsPage({ fetch: fetchImpl, session, onClose = () => {} } = {}) {
+function settingsPage({ fetch: fetchImpl, session, snapshot, onClose = () => {} } = {}) {
   const react = createReact()
   const { registered } = mount(react.React, { fetch: fetchImpl })
   const section = registered.find((entry) => entry.options.name === 'settings.section').component
   const props = {
     close: onClose,
-    // The shell's standard feed for this slot; `current` is the selected session.
-    useSessions: (selector) => selector({ current: session, byId: {} }),
+    // Default to the current DSH catalog contract; explicit snapshots cover legacy hosts.
+    useSessions: (selector) => selector(snapshot || {
+      ids: session ? [session] : [],
+      byId: session ? { [session]: { id: session, retainedBy: { mainView: 1 } } } : {},
+      phase: 'ready',
+    }),
   }
   return { react, section, props }
 }
@@ -1053,6 +1057,62 @@ test('没有当前会话时，「阅读」设置页给出提示而不是静默�
   assert.equal(calls.length, 0, '没有会话就不该发请求')
   assert.match(textOf(react.render(section, props)), /没有打开的会话/)
 })
+
+test('阅读中心兼容旧版 current 会话字段', async () => {
+  const calls = []
+  const { react, section, props } = settingsPage({
+    snapshot: { current: 'legacy', byId: {} },
+    fetch: async (url, options) => {
+      calls.push(JSON.parse(options.body))
+      return { status: 200, json: async () => ({ ok: true }) }
+    },
+  })
+  await labeledButton(seedBooks(react, section, props), '开始阅读').props.onClick()
+  assert.equal(calls[0].sessionId, 'legacy')
+})
+
+test('阅读中心跟随主对话切换，忽略后台会话和 ids 顺序', async () => {
+  const calls = []
+  const snapshot = {
+    ids: ['background'],
+    byId: {
+      background: { id: 'background', retainedBy: { gateway: 1 } },
+      first: { id: 'first', retainedBy: { mainView: 1 } },
+      second: { id: 'second', retainedBy: {} },
+    },
+  }
+  const { react, section, props } = settingsPage({
+    snapshot,
+    fetch: async (url, options) => {
+      calls.push(JSON.parse(options.body))
+      return { status: 200, json: async () => ({ ok: true }) }
+    },
+  })
+  await labeledButton(seedBooks(react, section, props), '开始阅读').props.onClick()
+  snapshot.byId.first.retainedBy = {}
+  snapshot.byId.second.retainedBy = { mainView: 1 }
+  await labeledButton(react.render(section, props), '开始阅读').props.onClick()
+  assert.deepEqual(calls.map((call) => call.sessionId), ['first', 'second'])
+})
+
+for (const [label, byId] of [
+  ['只有后台会话', { background: { id: 'background', retainedBy: { gateway: 1 } } }],
+  ['主对话不明确', {
+    a: { id: 'a', retainedBy: { mainView: 1 } },
+    b: { id: 'b', retainedBy: { mainView: 1 } },
+  }],
+]) {
+  test(`阅读中心在${label}时不猜选会话`, async () => {
+    let requests = 0
+    const { react, section, props } = settingsPage({
+      snapshot: { byId },
+      fetch: async () => { requests += 1; throw new Error('unexpected request') },
+    })
+    await labeledButton(seedBooks(react, section, props), '开始阅读').props.onClick()
+    assert.equal(requests, 0)
+    assert.match(textOf(react.render(section, props)), /没有打开的会话/)
+  })
+}
 
 /* ── the Settings navigation icon ────────────────────────────────────────── */
 
