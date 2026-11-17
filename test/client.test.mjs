@@ -68,7 +68,7 @@ function mount(react = REACT_STUB, options = {}) {
   plugin.apply(ctx)
 
   // effects[0] installs styles, effects[1] registers the Chat node definition,
-  // effects[2] adapts the Settings navigation icon.
+  // The settings navigation icon is registered through its own slot.
   const disposers = []
   for (const effect of effects) {
     const dispose = effect()
@@ -1134,74 +1134,40 @@ for (const [label, byId] of [
 
 /* ── the Settings navigation icon ────────────────────────────────────────── */
 
-/** One fake settings-nav row, as far as the adaptation touches it. */
-function fakeNavRow(text) {
-  return {
-    textContent: text,
-    attributes: {},
-    setAttribute(name) {
-      this.attributes[name] = ''
-    },
-    removeAttribute(name) {
-      delete this.attributes[name]
-    },
-  }
-}
-
-test('设置导航给「阅读中心」换成书本图标，退出时把行还给外壳', () => {
-  const MARKER = 'data-dsh-read-settings-nav'
-  // Real rows carry the label with whatever whitespace the shell renders around it.
-  const rows = [fakeNavRow('常规'), fakeNavRow('  阅读中心  '), fakeNavRow('模型')]
-  const observers = []
-
-  class FakeObserver {
-    constructor(callback) {
-      this.callback = callback
-      this.disconnected = false
-      observers.push(this)
-    }
-    observe() {}
-    disconnect() {
-      this.disconnected = true
-    }
-  }
-
-  const { disposers } = mount(REACT_STUB, {
-    globals: {
-      document: {
-        body: {},
-        createElement: () => ({ dataset: {}, remove() {} }),
-        head: { append() {} },
-        querySelectorAll: (selector) =>
-          selector === '[role="dialog"] nav button'
-            ? rows
-            : rows.filter((row) => MARKER in row.attributes),
-      },
-      MutationObserver: FakeObserver,
-    },
-  })
-
-  // Only our row is tagged, and the label is matched after trimming.
-  assert.equal(MARKER in rows[1].attributes, true, 'expected our nav row to be marked')
-  assert.equal(MARKER in rows[0].attributes, false, 'another section must not be touched')
-  assert.equal(MARKER in rows[2].attributes, false)
-  assert.equal(observers.length, 1, 'the nav re-renders, so the row must be observed')
-
-  // The stylesheet hides whatever the shell drew and paints the book in its place.
-  assert.match(SOURCE, /\[data-dsh-read-settings-nav\] > svg\{display:none\}/)
-  assert.match(
-    SOURCE,
-    /\[data-dsh-read-settings-nav\]::before\{content:'';flex:none;width:16px;height:16px;background:currentColor/,
-  )
-
-  for (const dispose of disposers) dispose()
-  assert.equal(MARKER in rows[1].attributes, false, 'disposal must give the shell its row back')
-  assert.equal(observers[0].disconnected, true, 'disposal must stop the observer')
+test('阅读中心通过官方图标插槽提供唯一书本，不再注入 CSS 图标或观察宿主 DOM', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const icons = registered.filter((entry) => entry.options.name === 'settings.section.icon')
+  assert.equal(icons.length, 1)
+  assert.equal(icons[0].options.id, 'dsh-read')
+  const icon = react.render(icons[0].component, { size: 22, active: true })
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props.width, 22)
+  assert.equal(icon.props.height, 22)
+  assert.equal(icon.props.stroke, 'currentColor')
+  assert.equal(icon.props['aria-hidden'], true)
+  assert.equal(elements(icon).filter((node) => node.type === 'svg').length, 1)
+  assert.doesNotMatch(SOURCE, /data-dsh-read-settings-nav|MutationObserver|registerSettingsNavIcon/)
 })
 
-test('没有 DOM 可改时，导航图标适配安静跳过', () => {
-  // The default sandbox has neither querySelectorAll nor MutationObserver.
-  assert.doesNotThrow(() => mount())
+test('library loads without a redundant count row and retains failure feedback', async () => {
+  let fail = false
+  const { react, section, props } = settingsPage({ fetch: async () => {
+    if (fail) throw new Error('目录无权访问')
+    return response({ ok: true, dir: '/books', parent: '/', directories: [], books: [
+      { path: '/books/活着.epub', name: '活着.epub', extension: 'epub', size: 1024, progress: null },
+    ] })
+  } })
+  const render = () => react.render(section, props)
+  await labeledButton(render(), '加载').props.onClick()
+  assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
+  assert.doesNotMatch(textOf(render()), /共 \d+ 本书/)
+  fail = true
+  await labeledButton(render(), '加载').props.onClick()
+  assert.match(textOf(withClass(render(), 'dshReadLibStatus')), /目录无权访问/)
+  fail = false
+  await labeledButton(render(), '加载').props.onClick()
+  assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
 })
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */

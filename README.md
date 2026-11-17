@@ -202,10 +202,9 @@ settled result text into the book metadata the card renders. The typewriter timi
 the card: one `setTimeout` per step, keyed on the current values, so changing speed or pausing
 takes effect on the very next tick.
 
-`settings.section` projects no icon field, so the shell paints its own generic gear beside every
-external section. The bundle therefore tags its own nav row — matched by the label it registered —
-with a `data-dsh-read-settings-nav` attribute and swaps that gear for a book in `currentColor`
-(the same DOM adaptation `dsh-better-sidebar` uses, and undone on disposal).
+The book icon uses `settings.section.icon` with the matching section ID, so the shell replaces
+its fallback gear without a DOM observer or extra CSS icon. Successful library loads do not add
+a redundant count/status row; load failures still show an error.
 
 The 阅读 page deliberately owns no reading state. Pressing 开始阅读 posts to `/start` — with the
 session the shell has selected, from the `useSessions` standard prop — and the host runs the real
