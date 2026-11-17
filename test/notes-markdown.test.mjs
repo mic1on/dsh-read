@@ -261,6 +261,7 @@ test('Obsidian-normalized plain and single-quoted YAML keeps managed identity an
   assert.equal(await vault.write(apostropheBook, sample({ id: "note-'1", title: 'Book', answer: '自动回填', answerState: 'answered' })), path)
   const content = await readFile(path, 'utf8')
   assert.match(content, /自动回填/)
+  assert.doesNotMatch(content, /Book as a YAML multiline value/, 'generated multiline metadata continuation is replaced, not left as invalid YAML')
   assert.match(content, /## 我的笔记\n保留正文/)
   assert.equal((await readdir(dirname(path))).filter((name) => name.endsWith('.md')).length, 1)
   assert.equal(await vault.remove(apostropheBook, "note-'1"), true)
