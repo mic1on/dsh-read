@@ -184,9 +184,9 @@ ctx.slots.register({ name: 'conversation.chat.commandview', key: 'read' }, () =>
 文本解析成卡片要渲染的书籍元数据。打字机节奏在卡片里：每一步一个 `setTimeout`，闭包捕获当前值，
 所以调速度或暂停在下一个 tick 就生效。
 
-`settings.section` 的公开契约里**没有图标字段**，外壳会给每个外部插件分区画一个通用齿轮。
-所以 bundle 会按注册的 label 认出自己那一行，打上 `data-dsh-read-settings-nav` 标记，再把这个
-齿轮换成 `currentColor` 的书本图标（与 `dsh-better-sidebar` 同一种 DOM 适配，销毁时撤回）。
+阅读中心通过 `settings.section.icon` 注册与分区 ID 匹配的书本图标，由外壳替换默认齿轮，
+不再观察或改写导航 DOM，也不额外添加 CSS 图标。加载书库成功不再显示重复的数量提示行，
+加载失败仍保留错误反馈。
 
 「阅读」设置页 **刻意不持有任何阅读状态**。点「开始阅读」只做一件事：把 shell 当前选中的会话
 （来自 `settings.section` 的标准 prop `useSessions`）POST 给 `/start`，由宿主在那里跑真正的
