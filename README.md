@@ -258,6 +258,9 @@ Q&A is not automatically scraped. Hosts without session projection support can s
 notes but cannot automatically capture answers. JSON keeps captured questions and answers too,
 so re-export does not require re-reading a conversation. Markdown failures leave JSON intact and
 are shown in settings. The `reading_notes` tool exposes the same management operations to agents.
+Tool export returns `confirmationRequired` without writing until the user explicitly agrees to overwrite
+manual edits and the agent supplies the boolean `confirmOverwrite: true`. Batch exports reuse a
+per-operation identity index while rechecking each target before publication.
 
 ## Security
 

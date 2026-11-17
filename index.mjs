@@ -289,7 +289,13 @@ async function readingNotesOperation(args = {}) {
       if (typeof args.path !== 'string') throw new Error('missing archive path')
       return notesStore.setVault(args.path)
     }
-    case 'export': return notesStore.exportAll({ overwrite: true })
+    case 'export': {
+      if (args.confirmOverwrite !== true) return {
+        confirmationRequired: true,
+        message: '全量导出将覆盖同 ID 插件文件中的手写内容，无关文件保留。请先取得用户明确同意，再传入 confirmOverwrite: true；当前未执行导出。',
+      }
+      return notesStore.exportAll({ overwrite: true })
+    }
     case 'list': {
       const notes = await notesStore.notes()
       return { notes: args.path ? notes[resolve(args.path)] || [] : notes }
@@ -569,7 +575,7 @@ export function apply(ctx) {
     })
     register(`${API_PREFIX}/export`, async (req) => {
       if (req.method !== 'POST') throw new Error('method not allowed')
-      return { ok: true, ...(await readingNotesOperation({ action: 'export' })) }
+      return { ok: true, ...(await readingNotesOperation({ action: 'export', confirmOverwrite: true })) }
     })
     register(`${API_PREFIX}/vault/open`, async (req) => {
       if (req.method !== 'POST') throw new Error('method not allowed')

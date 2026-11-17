@@ -287,6 +287,102 @@ test('recognizable managed notes with unsupported identity YAML fail rather than
   assert.equal((await readdir(dirname(path))).filter((name) => name.endsWith('.md')).length, 1)
 })
 
+test('batch export scans each book once, reuses identities and reads Markdown linearly', async (t) => {
+  const { vault } = await fixture(t)
+  const entries = Array.from({ length: 24 }, (_, i) => ({
+    bookPath: i % 2 ? '/books/other.epub' : book,
+    note: sample({ id: `batch-${i}`, paragraph: i, answer: 'A'.repeat(100 * 1024) }),
+  }))
+  const created = await vault.writeAll(entries)
+  assert.ok(created.every((result) => result.path))
+  const nested = join(dirname(created[0].path), 'nested')
+  await mkdir(nested)
+  const moved = join(nested, 'renamed.md')
+  await rename(created[0].path, moved)
+  await writeFile(moved, (await readFile(moved, 'utf8')) + '\nmanual tail\n')
+  const read = vault._read.bind(vault), books = vault._books.bind(vault), index = vault._index.bind(vault)
+  let reads = 0, bookScans = 0, noteScans = 0
+  vault._read = async (path) => { if (/\.md$/.test(path)) reads++; return read(path) }
+  vault._books = async (...args) => { bookScans++; return books(...args) }
+  vault._index = async (...args) => { noteScans++; return index(...args) }
+  const updated = entries.map((entry) => ({ ...entry, note: { ...entry.note, answer: 'updated' } }))
+  const results = await vault.writeAll(updated, { overwrite: true })
+  assert.ok(results.every((result) => result.path))
+  assert.equal(results[0].path, moved)
+  assert.equal(bookScans, 1)
+  assert.equal(noteScans, 2)
+  assert.ok(reads <= entries.length * 4, `expected linear Markdown reads, got ${reads}`)
+  assert.doesNotMatch(await readFile(moved, 'utf8'), /manual tail/)
+  const repeated = await vault.writeAll([updated[0], updated[0]])
+  assert.deepEqual(repeated.map((result) => result.path), [moved, moved])
+})
+
+test('batch migration preserves manual content and isolates duplicate identities and invalid notes', async (t) => {
+  const { vault } = await fixture(t)
+  const entries = [sample(), sample({ id: 'note-2', paragraph: 2 })].map((note) => ({ bookPath: book, note }))
+  const created = await vault.writeAll(entries)
+  const original = await readFile(created[0].path, 'utf8')
+  await writeFile(join(dirname(created[0].path), 'copy.md'), original)
+  await writeFile(created[1].path, (await readFile(created[1].path, 'utf8')) + '\nmanual tail\n')
+  const unrelated = join(dirname(created[0].path), 'user.md')
+  await writeFile(unrelated, 'unrelated')
+  const results = await vault.writeAll([...entries, { bookPath: book, note: sample({ id: 'bad', paragraph: -1 }) }])
+  assert.match(results[0].error.message, /duplicate/)
+  assert.equal(results[1].path, created[1].path)
+  assert.match(results[2].error.message, /paragraph/)
+  assert.equal(await readFile(created[0].path, 'utf8'), original)
+  assert.match(await readFile(created[1].path, 'utf8'), /manual tail/)
+  assert.equal(await readFile(unrelated, 'utf8'), 'unrelated')
+})
+
+for (const change of ['content', 'identity', 'symlink', 'hardlink', 'manifest']) {
+  test(`batch rejects ${change} changes after indexing without touching the changed file`, async (t) => {
+    const { vault, base } = await fixture(t)
+    const note = sample()
+    const path = await vault.write(book, note)
+    const original = await readFile(path, 'utf8')
+    const index = vault._index.bind(vault)
+    let protectedPath = path, expected = original
+    vault._index = async (...args) => {
+      const result = await index(...args)
+      if (change === 'content' || change === 'identity') {
+        expected = change === 'content' ? original + '\nconcurrent edit\n' : original.replace('note-1', 'another-id')
+        await writeFile(path, expected)
+      } else if (change === 'symlink') {
+        protectedPath = join(base, 'outside.md')
+        expected = 'outside stays safe'
+        await writeFile(protectedPath, expected)
+        await rename(path, join(base, 'old.md'))
+        await symlink(protectedPath, path)
+      } else if (change === 'hardlink') {
+        protectedPath = join(base, 'alias.md')
+        await link(path, protectedPath)
+      } else {
+        await writeFile(join(dirname(path), '.dsh-read-book.json'), JSON.stringify({ marker: 'dsh-read-book-v1', book_path: '/books/changed.epub' }))
+      }
+      return result
+    }
+    const [result] = await vault.writeAll([{ bookPath: book, note: { ...note, answer: 'must not write' } }], { overwrite: true })
+    assert.match(result.error.message, /changed|symlink|hardlink/)
+    assert.equal(await readFile(protectedPath, 'utf8'), expected)
+  })
+}
+
+test('batch retains final publication concurrency check after target revalidation', async (t) => {
+  const { vault } = await fixture(t)
+  const path = await vault.write(book, sample())
+  const edited = (await readFile(path, 'utf8')) + '\nlate edit\n'
+  const publish = vault._publish.bind(vault)
+  vault._publish = async (...args) => {
+    await writeFile(path, edited)
+    return publish(...args)
+  }
+  const [result] = await vault.writeAll([{ bookPath: book, note: sample({ answer: 'must not write' }) }], { overwrite: true })
+  assert.match(result.error.message, /changed before update/)
+  assert.equal(await readFile(path, 'utf8'), edited)
+  assert.ok((await readdir(dirname(path))).every((name) => !name.endsWith('.tmp')))
+})
+
 test('parallel writes across instances serialize and avoid duplicate notes and temporary leftovers', async (t) => {
   const { vault, root } = await fixture(t)
   const paths = await Promise.all(Array.from({ length: 8 }, (_, index) => new MarkdownVault(root).write(book, sample({ id: `parallel-${index}` }))))

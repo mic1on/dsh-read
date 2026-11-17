@@ -128,6 +128,30 @@ test('Markdown removal can be retried safely after JSON entry is already removed
   assert.equal((await markdownFiles(vault)).length, 0)
 })
 
+test('migration and export use one batch with per-note failure reporting', async () => {
+  const { store, path, vault } = await fixture()
+  for (let i = 0; i < 4; i++) await store.add({ path, kind: 'note', paragraph: i, text: `memo ${i}` })
+  assert.equal((await store.setVault(vault)).migration.exported, 4)
+  const mirror = store.vaults.get(vault)
+  const batch = mirror.writeAll.bind(mirror)
+  let calls = 0
+  mirror.write = async () => { throw new Error('single-note export must not run') }
+  mirror.writeAll = async (...args) => { calls++; return batch(...args) }
+  const notes = await store.notes()
+  notes[path].push({ ...notes[path][0], id: 'invalid', paragraph: -1 })
+  await store.write('notes.json', notes)
+  const result = await store.exportAll({ overwrite: true })
+  assert.equal(calls, 1)
+  assert.equal(result.exported, 4)
+  assert.equal(result.failed, 1)
+  assert.match(result.errors[0], /invalid.*paragraph/)
+  assert.match((await store.status()).error, /1 条批注未导出/)
+  const migration = await store.setVault(vault)
+  assert.equal(calls, 2)
+  assert.equal(migration.migration.exported, 4)
+  assert.equal(migration.migration.failed, 1)
+})
+
 test('corrupted JSON is refused rather than overwritten and invalid paths fail clearly', async () => {
   const { store, path } = await fixture()
   await mkdir(store.directory)

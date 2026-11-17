@@ -5,14 +5,27 @@ import { mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { register } from 'node:module'
+
+register(`data:text/javascript,${encodeURIComponent(`
+  export async function resolve(specifier, context, nextResolve) {
+    if (specifier === '@deepseek-ai/dsh-tools') return {
+      url: 'data:text/javascript,export const defineTool = (definition) => definition',
+      shortCircuit: true,
+    }
+    return nextResolve(specifier, context)
+  }
+`)}`)
 
 const home = await mkdtemp(join(tmpdir(), 'dsh-read-integration-'))
 process.env.DSH_HOME = home
 const { apply } = await import('../index.mjs')
 
 async function mount() {
-  const routes = new Map(), listeners = new Map(), pending = [], cleanup = []
+  const routes = new Map(), listeners = new Map(), pending = [], cleanup = [], tools = new Map()
   const sessions = []
+  let toolRegistered
+  const toolsReady = new Promise((resolve) => { toolRegistered = resolve })
   let definition
   const cells = new WeakMap()
   const handle = { stateOf(session) {
@@ -33,7 +46,7 @@ async function mount() {
     ...capabilities,
     get: () => undefined,
     agents: { list: () => [], get: () => undefined },
-    commands: { register: () => () => {} }, tools: { register: () => () => {} },
+    commands: { register: () => () => {} }, tools: { register(tool) { tools.set(tool.name, tool); if (tool.name === 'reading_notes') toolRegistered(); return () => tools.delete(tool.name) } },
     inject(deps, callback) { const result = callback(ctx); if (result?.then) pending.push(result) },
     on(name, listener) {
       const set = listeners.get(name) || new Set()
@@ -43,7 +56,7 @@ async function mount() {
     effect(callback) { const dispose = callback(); if (typeof dispose === 'function') cleanup.push(dispose) },
   }
   apply(ctx)
-  await Promise.all(pending)
+  await Promise.all([...pending, toolsReady])
   const session = { id: 'test-reading-session', events: [] }
   sessions.push(session)
   for (const listener of listeners.get('session/created') || []) listener(session)
@@ -60,7 +73,7 @@ async function mount() {
     await handler({ url: path, method: body === undefined ? 'GET' : 'POST', async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)) } }, res)
     return { status, ...payload }
   }
-  return { request, append, async dispose() { for (const fn of cleanup.reverse()) await fn() } }
+  return { request, append, tools, async dispose() { for (const fn of cleanup.reverse()) await fn() } }
 }
 
 test('configure → question → committed turn → Markdown → export → remove round trip', async () => {
@@ -89,6 +102,32 @@ test('configure → question → committed turn → Markdown → export → remo
   // Routes are disposed; JSON is a durable independent backup.
   const notes = JSON.parse(await readFile(join(home, 'dsh-read', 'notes.json'), 'utf8'))
   assert.equal(notes[path][0].answerState, 'answered')
+})
+
+test('tool export requires explicit boolean overwrite consent; confirmed UI export still works', async () => {
+  const { request, tools, dispose } = await mount()
+  try {
+    await request('/dsh-read/api/vault', { path: join(home, 'consent-vault') })
+    const saved = await request('/dsh-read/api/notes', { path: join(home, '苏东坡传.txt'), kind: 'note', text: 'memo' })
+    const original = await readFile(saved.mdPath, 'utf8')
+    const edited = original + '\nhandwritten tail\n'
+    await writeFile(saved.mdPath, edited)
+    const tool = tools.get('reading_notes')
+    assert.ok(tool)
+    for (const value of [undefined, false, 'true', 1]) {
+      const result = JSON.parse((await tool.execute({ action: 'export', confirmOverwrite: value })).result)
+      assert.equal(result.confirmationRequired, true)
+      assert.equal(result.exported, undefined)
+      assert.equal(await readFile(saved.mdPath, 'utf8'), edited)
+    }
+    const exported = JSON.parse((await tool.execute({ action: 'export', confirmOverwrite: true })).result)
+    assert.ok(exported.exported >= 1)
+    assert.equal(await readFile(saved.mdPath, 'utf8'), original)
+    await writeFile(saved.mdPath, edited)
+    assert.ok((await request('/dsh-read/api/export', {})).exported >= 1)
+    assert.equal(await readFile(saved.mdPath, 'utf8'), original)
+    await request('/dsh-read/api/notes', { path: join(home, '苏东坡传.txt'), remove: saved.note.id })
+  } finally { await dispose() }
 })
 
 test('vault and export method boundaries reject mixed operations, preserve config', async () => {
