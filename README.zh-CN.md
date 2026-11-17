@@ -121,38 +121,9 @@ bundle 是在启动时合成的，光刷新页面不够。
 
 ## 批注与 Obsidian
 
-设置 → 阅读中心 → **批注归档**，点击 **选择…**，根据宿主能力打开系统窗口或应用内目录浏览器。
-应用内浏览器可逐层进入文件夹、返回上一级或主目录，点击「选择此目录」回填路径，再点 **保存**。
-默认只显示状态和路径两行；**导出全部 / 打开目录 / 停用归档** 位于标题旁的 **更多** 中。
-取消选择不会改动路径或配置，也可手动填写绝对目录或 `~/...` 路径（建议独立子目录，如
-`~/Documents/ReadingNotes` 或你的 vault 下的 `Reading`）。目录选择器不可用时会提示手动输入。
-点击「停用归档」关闭 Markdown 归档，原阅读行为不变。
-首次保存会补导已有批注，兼容已有 `.obsidian` 的 vault。书籍原文件已移动也能导出已有摘录。
-
-```text
-ReadingNotes/
-  苏东坡传/
-    2026-11-17-0842-第64段-引用摘要.md
-```
-
-文件含 YAML 属性（书名、源路径、0 基段落号、1 基显示号、时间、类型、ID）、原文引用、问题、AI 回答。
-「记一笔」当前记录摘录；你可以在 Markdown 的插件标记区外写自己的感想。
-普通回答回填保留你添加的正文；**更多 → 导出全部**需二次确认，会重建插件生成的同 ID 文件，覆盖其中手改，
-但不会删除无关文件。每个书目录的隐藏 `.dsh-read-book.json` 用于身份校验，请保留。
-删除批注时同步删除其生成文件，关闭归档/切换目录不清理旧目录。
-
-问 AI 的草稿引用后带 `<!--dshr-ID-->` 注释：输入框与模型可见，Markdown 阅读视图不显示；请勿删掉，
-否则无法关联回答。未发送的草稿保持 `pending`，正常结束为 `answered`，取消/失败为 `interrupted`。
-同一轮多个批注共享各自提问之后的该轮正文；不包含 reasoning、工具输出或其他会话的回答。
-超过 10 分钟的回答暂留 pending，重启后或重新打开该会话时尽力补齐；超过 2 Mi 字符标记为截断，
-不会冒充完整回答。旧版本只存在于会话里的问答没有锚点，**不会自动补抓**；已有摘录可迁移。
-
-Markdown 写失败时 JSON 仍保留，界面会显示错误；修复目录权限后可重新导出。
-JSON 同时保存问题和回答，重导不会因会话日志不可用而丢掉已归档回答。模型可通过 `reading_notes`
-查看/配置/导出批注（导出与删除的覆盖影响与界面相同）。工具导出默认返回 `confirmationRequired`，不写文件；
-只有用户明确同意覆盖手写内容后，模型传入布尔参数 `confirmOverwrite: true` 才会执行。
-批量导出在单次操作内复用身份索引，实际写入前仍重新校验目标文件。回答关联依赖支持 session projection 的 DSH；
-没有相关服务的旧宿主仍可读书、记摘录和导出，但不自动回填。
+归档的启用、目录选择、迁移、手写内容保护、导出覆盖确认、回答状态和旧宿主兼容说明统一维护在
+[README：Markdown annotations and Obsidian](README.md#markdown-annotations-and-obsidian)。
+实现与安全边界见[批注归档设计](docs/superpowers/specs/2026-11-17-notes-markdown-design.md)。
 
 ## 支持的格式
 
@@ -185,16 +156,8 @@ PalmDB 解析、HTML 转文本、段落/章节模型、书库搜索、进度落�
 - `ctx.commands.register({ name: 'read', … })` 解析出一本书，把它的元数据（路径、书名、格式、
   字数、段落数、章节目录）作为命令的 settled result 文本返回。
 - `book_search` 模型工具只把**书库搜索**能力暴露给 Agent，其余什么都不给——它从不返回正文。
-- 五条 JSON 路由支撑阅读中心和阅读卡片，并且是通过 `ctx.inject(['webServer'], …)` 注册的，**不能**
-  放进插件自己的 `inject` 数组：它是可选且晚挂载的服务，否则 headless profile 下插件会永远等待。
-
-| 路由 | 用途 |
-| --- | --- |
-| `GET\|POST /dsh-read/api/library` | 阅读中心的一层目录：子目录、书籍、以及每本书已保存的进度 |
-| `POST /dsh-read/api/start` | 在活着的会话上执行 `/read <path>`，让阅读器出现在对话里；不带会话 ID 时落在唯一在跑的那个会话上 |
-| `GET /dsh-read/api/open?path=` | 解析书籍，返回元数据与章节目录 |
-| `GET /dsh-read/api/paragraphs?path=&from=&count=` | 取一页段落 |
-| `GET\|POST /dsh-read/api/progress` | 读取 / 保存 / 清除阅读位置 |
+- 阅读中心、卡片与批注归档的 HTTP 路由及可选服务接入说明见
+  [README 的实现方式](README.md#how-it-works)；路由和请求字段以 [`index.mjs`](index.mjs) 的注册为准。
 
 `/library` **只解析已经有进度的那几本书**：百分比需要段落总数，那是唯一昂贵的字段，其余部分
 都只是一次目录读取。
@@ -249,13 +212,8 @@ Markdown 和书目录身份文件。只更新/删除身份匹配的插件文件�
 
 ## 开发
 
-```bash
-node --test "test/*.test.mjs"
-```
-
-无构建步骤；Zod 用于宿主会话投影的状态校验。测试会在内存里现造最小的 EPUB 与 MOBI 容器并用真实解析器读回来，用假的 cordis
-context 驱动 Host 的 `/read` 命令和 HTTP 路由，并验证浏览器 bundle 的加载契约——其中包括重放一次
-`command/run` + `command/done` 折叠，确认它确实产出了阅读节点。
+依赖安装、测试与静态检查命令统一见 [README：Development](README.md#development)。
+无构建步骤；解析器、宿主路由、会话投影及客户端交互的回归测试位于 `test/`。
 
 ### 目录结构
 

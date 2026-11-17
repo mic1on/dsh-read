@@ -1,7 +1,7 @@
 // Host wiring with realistic awaited projection registration, committed session events
 // and HTTP calls; no model requests, profile mutation, or real notes are involved.
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -88,9 +88,11 @@ test('configure → question → committed turn → Markdown → export → remo
   const saved = await request('/dsh-read/api/notes', { path, paragraph: 1, quote: '原文摘录', kind: 'question', sessionId: 'test-reading-session' })
   assert.ok(saved.mdPath)
   assert.match(await readFile(saved.mdPath, 'utf8'), /pending/)
+  await writeFile(saved.mdPath, (await readFile(saved.mdPath, 'utf8')) + '\n## 我的手写总结\n这段应在自动回填后保留。\n')
   append('turn/start', { turn: 1 })
   append('user/message', { id: 'u1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `《苏东坡传》（第 2 段）：\n\n「原文摘录」<!--dshr-${saved.note.id}-->\n\n这里什么意思？` }] })
   append('assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第一部分' }, { type: 'reasoning', text: '不导出' }] } })
+  append('tool/result', { turn: 1, content: '工具内部输出，不得归档' })
   append('assistant/message', { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: '**第二部分**' }] } })
   append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   await dispose() // drains event IO, not a sleep or polling loop
@@ -102,6 +104,16 @@ test('configure → question → committed turn → Markdown → export → remo
   // Routes are disposed; JSON is a durable independent backup.
   const notes = JSON.parse(await readFile(join(home, 'dsh-read', 'notes.json'), 'utf8'))
   assert.equal(notes[path][0].answerState, 'answered')
+  assert.equal(notes[path][0].question, '这里什么意思？')
+  assert.equal(notes[path][0].answer, '第一部分\n\n**第二部分**')
+  assert.match(md, /## 我的手写总结\n这段应在自动回填后保留。/)
+  assert.doesNotMatch(md, /工具内部输出/)
+  if (process.env.DSH_READ_TEST_EVIDENCE_DIR) {
+    const evidence = process.env.DSH_READ_TEST_EVIDENCE_DIR
+    await mkdir(evidence, { recursive: true })
+    await writeFile(join(evidence, 'question-after-turn.md'), md)
+    await writeFile(join(evidence, 'question-backup.json'), JSON.stringify(notes, null, 2) + '\n')
+  }
 })
 
 test('tool export requires explicit boolean overwrite consent; confirmed UI export still works', async () => {
