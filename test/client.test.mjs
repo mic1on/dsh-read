@@ -27,6 +27,7 @@ function loadBundle(fetchImpl, globals) {
     fetch: fetchImpl || (() => Promise.reject(new Error('network disabled in tests'))),
     setTimeout,
     clearTimeout,
+    AbortController,
     console,
   }
   Object.assign(sandbox, globals || {})
@@ -45,6 +46,7 @@ function mount(react = REACT_STUB, options = {}) {
   const registered = []
 
   const ctx = {
+    get: (name) => options.services?.[name],
     effect: (callback) => {
       effects.push(callback)
       return () => {}
@@ -229,7 +231,9 @@ function createReact() {
   const slots = []
   const setters = []
   const refs = []
+  const effects = []
   let cursor = 0
+  let effectCursor = 0
 
   const React = {
     // Function components render eagerly, the way React does. Without this a wrapper
@@ -259,8 +263,14 @@ function createReact() {
       if (!(slot in refs)) refs[slot] = { current: initial }
       return refs[slot]
     },
-    // Effects are deliberately inert: the card's data loading is not under test.
-    useEffect: () => {},
+    // Effects remain inert unless a test explicitly runs one, keeping playback timers out.
+    useEffect: (callback, deps) => {
+      const at = effectCursor++
+      const previous = effects[at]
+      if (!previous || !deps || deps.some((value, index) => value !== previous.deps?.[index])) {
+        effects[at] = { callback, deps, cleanup: previous?.cleanup }
+      }
+    },
   }
 
   return {
@@ -268,8 +278,16 @@ function createReact() {
     // ReaderCard's useState order: 0 stream, 1 index, 2 revealed, 3 playing, 4 speed, 5 status,
     // 6 busy. `setters` is populated by the first render.
     setters,
+    runEffect(index) {
+      effects[index].cleanup?.()
+      effects[index].cleanup = effects[index].callback()
+    },
+    unmount() {
+      for (const effect of effects) effect.cleanup?.()
+    },
     render(Component, props) {
       cursor = 0
+      effectCursor = 0
       return Component(props)
     },
   }
@@ -974,7 +992,7 @@ test('设置进度：滑杆保存的是拖到的段落，而不是原地不动',
   assert.match(textOf(tree), /第 901 \/ 2083 段/)
 
   const before = calls.length
-  await labeledButton(tree, '保存').props.onClick()
+  await labeledButton(withClass(tree, 'dshReadLibEditor'), '保存').props.onClick()
 
   const saved = calls.slice(before).find((call) => call.url === '/dsh-read/api/progress')
   assert.ok(saved, '保存应该写入进度')
@@ -1184,4 +1202,484 @@ test('设置导航给「阅读中心」换成书本图标，退出时把行还�
 test('没有 DOM 可改时，导航图标适配安静跳过', () => {
   // The default sandbox has neither querySelectorAll nor MutationObserver.
   assert.doesNotThrow(() => mount())
+})
+
+/* ── Markdown archive interactions ──────────────────────────────────────── */
+
+const response = (payload) => ({ status: 200, json: async () => payload })
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+function deferred() {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+async function archiveReader({ enabled = true, save = async () => ({ ok: true, note: { id: 'note-1' } }), facade = true, book = CARD_BOOK, getNotes } = {}) {
+  const calls = []
+  const drafts = []
+  const globals = { __dshReadSelection: fakeSelection('原文引用', 3) }
+  const react = createReact()
+  const { registered } = mount(react.React, {
+    globals,
+    fetch: async (url, options) => {
+      calls.push({ url, options })
+      return response(options?.method === 'POST' ? await save(JSON.parse(options.body))
+        : getNotes ? await getNotes() : { ok: true, notes: [], archiveEnabled: enabled })
+    },
+  })
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const props = { node: { data: { book } }, sessionId: 'reading-session',
+    inputActions: facade ? { setDraft: (text) => drafts.push(text) } : undefined }
+  react.render(card, props)
+  react.runEffect(0) // mounted guard
+  react.runEffect(1) // notes + archiveEnabled, not the paragraph/typewriter effects
+  await flush()
+  const render = () => react.render(card, props)
+  withClass(render(), 'dshReadStream').props.onMouseUp()
+  return { react, props, render, calls, drafts, selection: globals.__dshReadSelection }
+}
+
+test('archive-enabled ask persists a question before filling a tagged draft, without double submission', async () => {
+  const pending = deferred()
+  const reader = await archiveReader({ save: () => pending.promise })
+  const ask = labeledButton(reader.render(), '问 AI')
+  const saving = ask.props.onClick()
+  ask.props.onClick() // same stale closure, before React rerenders
+  assert.equal(reader.drafts.length, 0)
+  assert.equal(reader.calls.filter((call) => call.options).length, 1)
+  assert.equal(labeledButton(reader.render(), '问 AI').props.disabled, true)
+  assert.equal(labeledButton(reader.render(), '记一笔').props.disabled, true)
+  const post = reader.calls.find((call) => call.options)
+  assert.deepEqual(JSON.parse(post.options.body), {
+    path: CARD_BOOK.path, paragraph: 3, quote: '原文引用', kind: 'question', text: '',
+    title: '活着', sessionId: 'reading-session',
+  })
+  pending.resolve({ ok: true, note: { id: 'note-1' } })
+  await saving
+  assert.equal(reader.drafts.length, 1)
+  assert.equal(reader.drafts[0], '《活着》（第 4 段）：\n\n「原文引用」<!--dshr-note-1-->\n\n')
+  assert.equal(withClass(reader.render(), 'dshReadAsk'), undefined)
+})
+
+test('book archive metadata keeps asks archived while notes GET is unresolved', async () => {
+  const pending = deferred()
+  const reader = await archiveReader({ book: { ...CARD_BOOK, archiveEnabled: true }, getNotes: () => pending.promise })
+  await labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.equal(reader.calls.filter((call) => call.options).length, 1)
+  assert.match(reader.drafts[0], /<!--dshr-note-1-->/)
+  pending.resolve({ ok: true, notes: [], archiveEnabled: true })
+  await flush()
+})
+
+test('re-entering the reader refreshes archive configuration without polling on internal focus', async () => {
+  let enabled = false
+  const reader = await archiveReader({ getNotes: async () => ({ ok: true, notes: [], archiveEnabled: enabled }) })
+  const before = reader.calls.length
+  reader.render().props.onFocus({ currentTarget: { contains: () => true }, relatedTarget: {} })
+  assert.equal(reader.calls.length, before)
+  enabled = true
+  reader.render().props.onFocus({ currentTarget: { contains: () => false }, relatedTarget: null })
+  await flush()
+  await labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.match(reader.drafts[0], /<!--dshr-note-1-->/)
+})
+
+test('late annotation save cannot replace a composer draft the reader edited meanwhile', async () => {
+  const pending = deferred()
+  const reader = await archiveReader({ save: () => pending.promise })
+  let revision = 1
+  reader.props.useInput = (selector) => selector({ draftRev: revision })
+  const saving = labeledButton(reader.render(), '问 AI').props.onClick()
+  revision = 2
+  reader.render()
+  pending.resolve({ ok: true, note: { id: 'note-1' } })
+  await saving
+  assert.equal(reader.drafts.length, 0)
+  assert.match(textOf(reader.render()), /未覆盖你的草稿/)
+})
+
+test('archive-disabled ask remains synchronous and does not write a question', async () => {
+  const reader = await archiveReader({ enabled: false })
+  const result = labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.equal(result, undefined)
+  assert.equal(reader.drafts.length, 1)
+  assert.doesNotMatch(reader.drafts[0], /<!--/)
+  assert.equal(reader.calls.filter((call) => call.options).length, 0)
+})
+
+test('Markdown write failure still fills the tagged draft and reports the partial failure', async () => {
+  const reader = await archiveReader({ save: async () => ({ ok: true, note: { id: 'note-2' }, mdError: 'Markdown 保存失败：只读目录' }) })
+  await labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.match(reader.drafts[0], /<!--dshr-note-2-->/)
+  assert.match(textOf(reader.render()), /批注已保存，Markdown 保存失败：只读目录/)
+})
+
+test('JSON save failure falls back to an ordinary draft and warns that it will not auto archive', async () => {
+  const reader = await archiveReader({ save: async () => { throw new Error('磁盘已满') } })
+  await labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.equal(reader.drafts.length, 1)
+  assert.doesNotMatch(reader.drafts[0], /<!--/)
+  assert.match(textOf(reader.render()), /本次提问不会自动归档：磁盘已满/)
+})
+
+test('no composer facade means no unsendable archive question is created', async () => {
+  const reader = await archiveReader({ facade: false })
+  await labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.equal(reader.calls.filter((call) => call.options).length, 0)
+  assert.match(textOf(reader.render()), /没有可用的输入框/)
+})
+
+test('a newer selection survives a late archive response and the old draft is not inserted', async () => {
+  const pending = deferred()
+  const reader = await archiveReader({ save: () => pending.promise })
+  const saving = labeledButton(reader.render(), '问 AI').props.onClick()
+  reader.selection.toString = () => '新的选区'
+  withClass(reader.render(), 'dshReadStream').props.onMouseUp()
+  reader.render()
+  pending.resolve({ ok: true, note: { id: 'old-note' } })
+  await saving
+  assert.equal(reader.drafts.length, 0)
+  assert.equal(reader.selection.cleared, undefined)
+  assert.ok(labeledButton(reader.render(), '问 AI'))
+  assert.equal(labeledButton(reader.render(), '问 AI').props.disabled, false)
+})
+
+test('invalidated selections cannot receive a late archived draft', async () => {
+  for (const mode of ['collapsed', 'whitespace', 'outside', 'cross-paragraph']) {
+    const pending = deferred()
+    const reader = await archiveReader({ save: () => pending.promise })
+    const saving = labeledButton(reader.render(), '问 AI').props.onClick()
+    if (mode === 'collapsed') reader.selection.isCollapsed = true
+    if (mode === 'whitespace') reader.selection.toString = () => '  '
+    if (mode === 'outside') reader.selection.getRangeAt().startContainer.closest = () => null
+    if (mode === 'cross-paragraph') reader.selection.getRangeAt().startContainer.closest('[data-paragraph]').contains = () => false
+    withClass(reader.render(), 'dshReadStream').props.onMouseUp()
+    assert.equal(withClass(reader.render(), 'dshReadAsk'), undefined, mode)
+    pending.resolve({ ok: true, note: { id: 'old-note' } })
+    await saving
+    assert.equal(reader.drafts.length, 0, mode)
+  }
+})
+
+test('selection bubble mouse and keyboard events do not bubble into selection capture', async () => {
+  const reader = await archiveReader({ enabled: false })
+  let stopped = 0
+  const bubble = withClass(reader.render(), 'dshReadAsk')
+  bubble.props.onMouseUp({ stopPropagation: () => stopped++ })
+  bubble.props.onKeyUp({ stopPropagation: () => stopped++ })
+  assert.equal(stopped, 2)
+  labeledButton(reader.render(), '问 AI').props.onClick()
+  assert.equal(reader.drafts.length, 1)
+})
+
+test('unmounted or changed-session readers never fill a stale draft', async () => {
+  for (const mode of ['unmount', 'session']) {
+    const pending = deferred()
+    const reader = await archiveReader({ save: () => pending.promise })
+    const saving = labeledButton(reader.render(), '问 AI').props.onClick()
+    if (mode === 'unmount') reader.react.unmount()
+    else { reader.props.sessionId = 'another-session'; reader.render() }
+    pending.resolve({ ok: true, note: { id: 'old-note' } })
+    await saving
+    assert.equal(reader.drafts.length, 0, mode)
+  }
+})
+
+test('记一笔 sends the title and shows Markdown failure without pretending the note was lost', async () => {
+  const pending = deferred()
+  const reader = await archiveReader({ save: () => pending.promise })
+  const note = labeledButton(reader.render(), '记一笔')
+  const saving = note.props.onClick()
+  note.props.onClick()
+  assert.equal(reader.calls.filter((call) => call.options).length, 1)
+  assert.equal(JSON.parse(reader.calls.find((call) => call.options).options.body).title, '活着')
+  pending.resolve({ ok: true, note: { id: 'note-1' }, mdError: 'Markdown 保存失败：只读目录' })
+  await saving
+  assert.match(textOf(reader.render()), /批注已保存，Markdown 保存失败：只读目录/)
+  assert.equal(reader.drafts.length, 0)
+})
+
+function vaultSettings(fetchImpl, props = {}) {
+  const react = createReact()
+  const { plugin } = mount(react.React, { fetch: fetchImpl })
+  const render = () => react.render(plugin.NotesVaultSettings, props)
+  render()
+  react.runEffect(0)
+  return { react, render }
+}
+function vaultField(tree) {
+  return elements(tree).find((element) => element.type === 'input' && element.props['aria-label'] === 'Markdown 保存目录')
+}
+const VAULT = { ok: true, path: '/Users/me/My Vault', suggestedPath: '~/Documents/ReadingNotes', bookCount: 2, noteCount: 9 }
+
+test('archive settings default to two compact rows without counts or explanatory copy', async () => {
+  const pending = deferred()
+  const view = vaultSettings(() => pending.promise)
+  for (const label of ['选择…', '保存', '更多 ▾']) {
+    assert.equal(labeledButton(view.render(), label).props.disabled, true)
+  }
+  pending.resolve(response(VAULT))
+  await flush()
+  assert.equal(vaultField(view.render()).props.value, VAULT.path)
+  assert.equal(vaultField(view.render()).props.placeholder, VAULT.suggestedPath)
+  assert.match(textOf(view.render()), /已启用/)
+  assert.doesNotMatch(textOf(view.render()), /已记录|本书|条批注|Obsidian|Markdown 保存目录|不代表|每本书/)
+  for (const label of ['停用归档', '导出全部', '打开目录']) assert.equal(labeledButton(view.render(), label), undefined)
+  const section = view.render()
+  assert.equal(section.children.filter(Boolean).length, 2, 'normal state contains only header and path row')
+  labeledButton(view.render(), '更多 ▾').props.onClick()
+  assert.equal(labeledButton(view.render(), '更多 ▴').props['aria-expanded'], true)
+  assert.equal(labeledButton(view.render(), '打开目录').props.disabled, false)
+  labeledButton(view.render(), '更多 ▴').props.onClick()
+  assert.equal(labeledButton(view.render(), '打开目录'), undefined)
+})
+
+test('late GET vault response does not overwrite an edited path', async () => {
+  const pending = deferred()
+  const view = vaultSettings(() => pending.promise)
+  vaultField(view.render()).props.onChange({ target: { value: '/new/vault' } })
+  pending.resolve(response(VAULT))
+  await flush()
+  assert.equal(vaultField(view.render()).props.value, '/new/vault')
+})
+
+test('export requires inline overwrite confirmation and locks all actions while pending', async () => {
+  const pending = deferred()
+  const calls = []
+  const view = vaultSettings(async (url, options) => {
+    calls.push({ url, options })
+    return options ? pending.promise : response(VAULT)
+  })
+  await flush()
+  labeledButton(view.render(), '更多 ▾').props.onClick()
+  labeledButton(view.render(), '导出全部').props.onClick()
+  assert.equal(calls.length, 1, 'opening confirmation must not export')
+  assert.match(textOf(view.render()), /覆盖插件文件中的手动修改/)
+  labeledButton(view.render(), '取消导出').props.onClick()
+  assert.equal(labeledButton(view.render(), '确认覆盖并导出'), undefined)
+  labeledButton(view.render(), '导出全部').props.onClick()
+  const confirm = labeledButton(view.render(), '确认覆盖并导出')
+  const exporting = confirm.props.onClick()
+  confirm.props.onClick()
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].url, '/dsh-read/api/export')
+  for (const label of ['选择…', '保存', '更多 ▴', '停用归档', '导出全部', '打开目录']) {
+    assert.equal(labeledButton(view.render(), label).props.disabled, true)
+  }
+  pending.resolve(response({ ok: true, exported: 8, failed: 1, errors: ['一条失败'] }))
+  await exporting
+  assert.match(textOf(view.render()), /成功 8 条，失败 1 条/)
+  assert.match(textOf(view.render()), /一条失败/)
+  assert.equal(elements(view.render()).find((element) => element.props.role === 'alert').props['data-error'], 'true')
+})
+
+test('save reports migration, open targets configured directory, and disable sends an empty path', async () => {
+  const calls = []
+  const view = vaultSettings(async (url, options) => {
+    calls.push({ url, options })
+    if (!options) return response({ ...VAULT, path: '' })
+    if (url.endsWith('/open')) return response({ ok: true })
+    return response({ ...VAULT, path: JSON.parse(options.body).path, migration: { exported: 3, failed: 0, errors: [] } })
+  })
+  await flush()
+  labeledButton(view.render(), '更多 ▾').props.onClick()
+  for (const label of ['停用归档', '导出全部', '打开目录']) assert.equal(labeledButton(view.render(), label).props.disabled, true)
+  // The suggested placeholder must never enable archiving implicitly.
+  assert.equal(vaultField(view.render()).props.value, '')
+  vaultField(view.render()).props.onChange({ target: { value: '/new/vault' } })
+  await labeledButton(view.render(), '保存').props.onClick()
+  assert.deepEqual(JSON.parse(calls[1].options.body), { path: '/new/vault' })
+  assert.equal(elements(view.render()).some((element) => element.props.role === 'alert'), false)
+  assert.match(textOf(view.render()), /已启用/)
+  await labeledButton(view.render(), '打开目录').props.onClick()
+  assert.equal(calls[2].url, '/dsh-read/api/vault/open')
+  await labeledButton(view.render(), '停用归档').props.onClick()
+  assert.deepEqual(JSON.parse(calls[3].options.body), { path: '' })
+  assert.equal(vaultField(view.render()).props.value, '')
+  assert.match(textOf(view.render()), /未启用/)
+  assert.equal(labeledButton(view.render(), '停用归档'), undefined)
+  labeledButton(view.render(), '更多 ▾').props.onClick()
+  for (const label of ['停用归档', '导出全部', '打开目录']) assert.equal(labeledButton(view.render(), label).props.disabled, true)
+})
+
+test('archive settings expose GET errors and can retry without implicit writes', async () => {
+  let attempts = 0
+  const view = vaultSettings(async (url, options) => {
+    assert.equal(url, '/dsh-read/api/vault')
+    assert.equal(options, undefined)
+    if (++attempts === 1) throw new Error('暂时离线')
+    return response(VAULT)
+  })
+  await flush()
+  assert.match(textOf(view.render()), /暂时离线/)
+  await labeledButton(view.render(), '重试').props.onClick()
+  assert.equal(vaultField(view.render()).props.value, VAULT.path)
+  assert.doesNotMatch(textOf(view.render()), /暂时离线/)
+})
+
+test('failed note save preserves selection for retry rather than losing it', async () => {
+  const reader = await archiveReader({ save: async () => { throw new Error('无法保存') } })
+  await labeledButton(reader.render(), '记一笔').props.onClick()
+  assert.ok(labeledButton(reader.render(), '记一笔'))
+  assert.equal(labeledButton(reader.render(), '记一笔').props.disabled, false)
+  assert.match(textOf(reader.render()), /无法保存/)
+})
+
+test('directory selection fills the path without saving and prevents duplicate chooser calls', async () => {
+  const picked = deferred()
+  const calls = []
+  let selections = 0
+  const view = vaultSettings(async (url, options) => {
+    calls.push({ url, options })
+    return response(VAULT)
+  }, { pickDirectory: () => { selections += 1; return picked.promise } })
+  await flush()
+  const button = labeledButton(view.render(), '选择…')
+  const selecting = button.props.onClick()
+  button.props.onClick()
+  assert.equal(selections, 1)
+  assert.equal(labeledButton(view.render(), '选择中…').props.disabled, true)
+  assert.equal(labeledButton(view.render(), '保存').props.disabled, true)
+  picked.resolve('/Users/me/Obsidian/阅读笔记')
+  await selecting
+  assert.equal(vaultField(view.render()).props.value, '/Users/me/Obsidian/阅读笔记')
+  assert.equal(elements(view.render()).some((element) => element.props.role === 'alert'), false)
+  assert.equal(calls.length, 1, 'choosing must not POST config or migrate notes')
+})
+
+test('cancelled or failed directory selection preserves path and supports manual input', async () => {
+  let fail = false
+  const view = vaultSettings(async () => response(VAULT), {
+    pickDirectory: async () => { if (fail) throw new Error('选择器不可用'); return null },
+  })
+  await flush()
+  vaultField(view.render()).props.onChange({ target: { value: '/my/unsaved-path' } })
+  await labeledButton(view.render(), '选择…').props.onClick()
+  assert.equal(vaultField(view.render()).props.value, '/my/unsaved-path')
+  fail = true
+  await labeledButton(view.render(), '选择…').props.onClick()
+  assert.equal(vaultField(view.render()).props.value, '/my/unsaved-path')
+  assert.match(textOf(view.render()), /无法选择目录：选择器不可用/)
+  assert.equal(labeledButton(view.render(), '保存').props.disabled, false)
+})
+
+test('directory selection result after unmount is ignored and missing chooser is explicit', async () => {
+  const picked = deferred()
+  const view = vaultSettings(async () => response(VAULT), { pickDirectory: () => picked.promise })
+  await flush()
+  const selecting = labeledButton(view.render(), '选择…').props.onClick()
+  view.react.unmount()
+  picked.resolve('/late/path')
+  await selecting
+  assert.equal(vaultField(view.render()).props.value, VAULT.path)
+  const legacy = vaultSettings(async () => response(VAULT))
+  await flush()
+  await labeledButton(legacy.render(), '选择…').props.onClick()
+  assert.match(textOf(legacy.render()), /请手动填写绝对路径/)
+})
+
+test('reading settings wire the chooser to the current uiWorkspace service', async () => {
+  const react = createReact()
+  const { registered } = mount(react.React, {
+    fetch: async (url) => response(url.endsWith('/directory-picker') ? { ok: true, kind: 'native' } : VAULT),
+    services: { uiWorkspace: { pickDirectory: async () => '/native/path' } },
+  })
+  const settings = registered.find((entry) => entry.options.name === 'settings.section').component
+  const props = { useSessions: (select) => select(undefined) }
+  let tree = react.render(settings, props)
+  const choose = labeledButton(tree, '选择…')
+  assert.ok(choose)
+  // Library state precedes the archive block. Its GET hasn't run in this focused test.
+  // Let the archive's GET settle by driving its last effect.
+  react.runEffect(1)
+  await flush()
+  tree = react.render(settings, props)
+  await labeledButton(tree, '选择…').props.onClick()
+  tree = react.render(settings, props)
+  assert.equal(vaultField(tree).props.value, '/native/path')
+})
+
+const DIRECTORY_HOME = {
+  path: '/Users/me', home: '/Users/me',
+  crumbs: [{ name: '/', path: '/' }, { name: 'Users', path: '/Users' }, { name: 'me', path: '/Users/me' }],
+  entries: [{ name: 'Documents', path: '/Users/me/Documents' }], truncated: false,
+}
+
+test('browse capability navigates folders and selects a directory without calling native pick or saving', async () => {
+  const listed = []
+  let nativeCalls = 0
+  const calls = []
+  const view = vaultSettings(async (url, options) => { calls.push({ url, options }); return response(VAULT) }, {
+    directoryCapability: async () => 'browse',
+    pickDirectory: async () => { nativeCalls++; throw new Error('native not allowed') },
+    listDirectory: async (path, signal) => {
+      assert.ok(signal instanceof AbortSignal)
+      listed.push(path)
+      return path === '/Users/me/Documents' ? {
+        ...DIRECTORY_HOME, path, entries: [], crumbs: [...DIRECTORY_HOME.crumbs, { name: 'Documents', path }],
+      } : DIRECTORY_HOME
+    },
+  })
+  await flush()
+  await labeledButton(view.render(), '选择…').props.onClick()
+  assert.equal(nativeCalls, 0)
+  assert.match(textOf(view.render()), /Documents/)
+  assert.equal(labeledButton(view.render(), '保存').props.disabled, true)
+  await labeledButton(view.render(), '▸ Documents').props.onClick()
+  assert.match(textOf(view.render()), /没有子目录/)
+  await labeledButton(view.render(), '上一级').props.onClick()
+  assert.equal(listed.at(-1), '/Users/me')
+  await labeledButton(view.render(), '▸ Documents').props.onClick()
+  labeledButton(view.render(), '选择此目录').props.onClick()
+  assert.equal(vaultField(view.render()).props.value, '/Users/me/Documents')
+  assert.equal(labeledButton(view.render(), '取消选择'), undefined)
+  assert.equal(calls.length, 1, 'only initial GET, no config mutation')
+})
+
+test('browse cancellation aborts pending request and ignores late listings', async () => {
+  const listing = deferred()
+  let signal
+  const view = vaultSettings(async () => response(VAULT), {
+    directoryCapability: async () => 'browse', pickDirectory: async () => { throw new Error('wrong capability') },
+    listDirectory: async (_path, requestSignal) => { signal = requestSignal; return listing.promise },
+  })
+  await flush()
+  const selecting = labeledButton(view.render(), '选择…').props.onClick()
+  await flush()
+  labeledButton(view.render(), '取消选择').props.onClick()
+  assert.equal(signal.aborted, true)
+  listing.resolve(DIRECTORY_HOME)
+  await selecting
+  assert.equal(labeledButton(view.render(), '选择此目录'), undefined)
+  assert.equal(vaultField(view.render()).props.value, VAULT.path)
+})
+
+test('browse errors can be retried or cancelled; unavailable capability never invokes native picker', async () => {
+  let attempts = 0
+  const view = vaultSettings(async () => response(VAULT), {
+    directoryCapability: async () => 'browse', pickDirectory: async () => { throw new Error('wrong capability') },
+    listDirectory: async () => { if (++attempts === 1) throw new Error('无权限'); return DIRECTORY_HOME },
+  })
+  await flush()
+  await labeledButton(view.render(), '选择…').props.onClick()
+  assert.match(textOf(view.render()), /无权限/)
+  assert.equal(labeledButton(view.render(), '选择此目录').props.disabled, true)
+  await labeledButton(view.render(), '重试目录').props.onClick()
+  assert.doesNotMatch(textOf(view.render()), /无权限/)
+  labeledButton(view.render(), '取消选择').props.onClick()
+  const unavailable = vaultSettings(async () => response(VAULT), {
+    directoryCapability: async () => 'unavailable', pickDirectory: async () => assert.fail('native must not be called'),
+  })
+  await flush()
+  await labeledButton(unavailable.render(), '选择…').props.onClick()
+  assert.match(textOf(unavailable.render()), /没有可用的目录选择器/)
+})
+
+test('archive settings ignore results after unmount', async () => {
+  const pending = deferred()
+  const view = vaultSettings(() => pending.promise)
+  view.react.unmount()
+  pending.resolve(response(VAULT))
+  await flush()
+  assert.equal(vaultField(view.render()).props.value, '')
 })
