@@ -1,6 +1,6 @@
 {
   "name": "dsh-read",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "description": "Read local EPUB / MOBI / text books inside DeepSeek Harness: the /read command streams the text into the conversation like an AI reply, with speed control, pause and progress.",
   "license": "MIT",
@@ -16,7 +16,9 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "files": [
     "index.mjs",
@@ -25,6 +27,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh-CN.md",
+    "locale",
+    "icon.svg",
     "LICENSE"
   ],
   "dsh": {
@@ -40,6 +44,9 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

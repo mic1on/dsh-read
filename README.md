@@ -39,9 +39,9 @@ document, so a global listener would turn every space you type into a pause.
 - **伴读：划词提问，留痕。** Select a passage and the reader offers 问 AI or 记一笔. 问 AI writes
 the question — book, paragraph and quote — into the composer, so you can add your own
 framing and send it yourself; 记一笔 records it without involving a session at all. Notes
-are stored per book under `$DSH_HOME/dsh-read/notes.json`, never in the transcript: asking
-about a passage already puts a message there, and a second copy would bury the conversation
-under hundreds of fragments.
+and captured questions/answers are stored per book under `$DSH_HOME/dsh-read/notes.json`.
+Configure an archive directory in 阅读中心 → 批注归档 to mirror each annotation as a Markdown file
+in a book folder. Completed AI answers are filled in automatically; no duplicate chat messages are inserted.
 - **Scroll back through everything you have read.** The loaded run grows in both
 directions instead of being one page: scrolling up pulls in earlier paragraphs and keeps
 your place, so you can reach the start of the book.
@@ -167,18 +167,13 @@ library search and progress persistence.
   settled result text.
 - A `book_search` model tool exposes library search to the agent — and nothing else. It never
   returns book text.
-- Five JSON routes back the tab and the reader card, registered through
+- HTTP routes back the reading centre, reader card and annotation archive. Their registrations
+  in [`index.mjs`](index.mjs) are the authoritative route and payload definitions. They use
   `ctx.inject(['webServer'], …)` rather than the plugin's `inject` array, because `webServer`
   is optional and published late and a headless profile would otherwise keep the plugin
   pending forever.
-
-| Route | Purpose |
-| --- | --- |
-| `GET\|POST /dsh-read/api/library` | One directory level for the 阅读 tab: subdirectories, books, and each book's saved progress |
-| `POST /dsh-read/api/start` | Run `/read <path>` on a live session so the reader appears in the conversation |
-| `GET /dsh-read/api/open?path=` | Parse a book, return metadata and the table of contents |
-| `GET /dsh-read/api/paragraphs?path=&from=&count=` | One page of paragraphs |
-| `GET\|POST /dsh-read/api/progress` | Read, save or clear reading positions |
+- `reading_notes` exposes annotation management; answer capture uses optional session services.
+  See the [archive implementation reference](docs/superpowers/specs/2026-11-17-notes-markdown-design.md).
 
 `/library` parses only the books that already have progress: a percentage needs the paragraph
 count, that is the one expensive field, and everything else in the listing is a directory
@@ -230,21 +225,68 @@ command you typed.
 Because each `/read` is its own lifecycle, several reader cards can coexist in one session and
 each keeps its own position.
 
+## Markdown annotations and Obsidian
+
+Archiving is **off by default**; the suggested directory is not enabled until you explicitly save a path.
+Without an archive, 问 AI only fills the composer draft; 记一笔 still saves its excerpt to JSON.
+In Settings → 阅读中心 → 批注归档, click **选择…**. Native Hosts open the OS chooser;
+browse Hosts open an inline folder browser with home/parent navigation. Choose the current folder,
+then **保存** to apply. The default view is two compact rows; export, open and disable are under **更多**. Canceling keeps the current path/configuration. You can also type an
+absolute or `~/...` path (suggested: `~/Documents/ReadingNotes`, or a dedicated folder inside your
+vault). If the chooser is unavailable, manual entry remains supported. Use **停用归档** to disable.
+Saving a path migrates existing notes, even into an existing Obsidian vault or when the original
+book has moved. Unrelated handwritten files are not overwritten; existing managed notes receive
+the normal bounded update described below. One annotation becomes one `.md` file in its book's folder.
+Keep the hidden `.dsh-read-book.json` ownership file in each book directory.
+
+Files contain YAML properties, the quote, your submitted question and AI answer. File names use
+one-based paragraph numbers; `paragraph` metadata remains zero-based. The `created` property is
+UTC ISO time; filenames use local time. 记一笔 saves the selected excerpt; add your own reflections
+outside the plugin's marked question/answer region. Normal updates regenerate plugin-owned YAML
+properties (including multiline values), but preserve custom properties and text outside that region.
+Keep the ownership properties and region markers intact so the file can still be identified and updated.
+**Export all** asks for confirmation: it regenerates managed files from JSON, replacing manual edits
+inside those files, but never deletes unrelated files.
+Deleting an annotation also removes its generated file; disabling/switching the archive leaves old files intact.
+
+Archive-enabled questions include an HTML comment `<!--dshr-ID-->` in the composer. It is visible
+to you and the model, hidden by Markdown reading view, and required to associate the response.
+Only committed assistant text after that question's admission in the matching turn is copied (not reasoning or tool outputs).
+Unsent drafts remain `pending`; successful replies become `answered`; canceled/failed replies
+retain partial text as `interrupted`. Turns over 10 minutes remain pending until recovery on restart
+or session reopen. Text over 2 Mi characters is marked truncated, not complete. Historical untagged
+Q&A is not automatically scraped. Hosts without session projection support can still save/export
+notes but cannot automatically capture answers. JSON keeps captured questions and answers too,
+so re-export does not require re-reading a conversation. Markdown failures leave JSON intact and
+are shown in settings. The `reading_notes` tool exposes the same management operations to agents.
+Tool export returns `confirmationRequired` without writing until the user explicitly agrees to overwrite
+manual edits and the agent supplies the boolean `confirmOverwrite: true`. See the
+[implementation reference](docs/superpowers/specs/2026-11-17-notes-markdown-design.md)
+for ownership checks and batch-export internals.
+
 ## Security
 
 The reader API only ever reads files whose extension is in the supported book list, and the
 `/read` command enforces the same whitelist — an explicit path to a non-book file is rejected
 rather than decoded as text. It is not a generic file-read endpoint, which matters because
-DSH's web server can be exposed beyond loopback. Progress and library roots are the only
-things written, and only under `$DSH_HOME/dsh-read/`.
+DSH's web server can be exposed beyond loopback. Configuration, progress and notes/answers
+are written under `$DSH_HOME/dsh-read/`. An explicitly configured Markdown archive also receives
+generated notes and per-book ownership metadata. Only matching plugin-generated identities can
+be updated/deleted; symlinks and hardlinks are refused.
 
 ## Development
 
+Install the standalone test dependency without the Harness peer packages, as CI does:
+
 ```bash
-node --test "test/*.test.mjs"
+npm install --ignore-scripts --legacy-peer-deps --no-package-lock
+npm test
 ```
 
-No dependencies and no build step. The tests build minimal EPUB and MOBI containers in memory
+No linter or formatter is configured. For syntax-only checks, use `node --check <file>` on
+changed JavaScript files and `git diff --check` for whitespace errors.
+
+No build step; Zod validates Host session-projection state. The tests build minimal EPUB and MOBI containers in memory
 and read them back through the real parsers, drive the host's `/read` command and HTTP routes
 against a fake cordis context, and verify the browser bundle's loader contract — including a
 replay of the `command/run` + `command/done` fold that produces the reader node.

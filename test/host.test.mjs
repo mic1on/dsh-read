@@ -37,7 +37,7 @@ function response() {
   }
 }
 
-function mount({ agent, agents } = {}) {
+function mount({ agent, agents, picker } = {}) {
   const routes = new Map()
   const commands = new Map()
   const executed = []
@@ -48,7 +48,9 @@ function mount({ agent, agents } = {}) {
   const ctx = {
     inject: (dependencies, callback) => {
       injected.push(dependencies)
+      if (dependencies[0] !== 'webServer') return () => {}
       callback({
+        get: (key) => key === 'directoryPicker' ? picker : undefined,
         webServer: {
           register: (route) => {
             routes.set(route.path, route.handler)
@@ -265,8 +267,10 @@ test('apply survives a strict cordis context that only exposes declared services
 test('host plugin exports its cordis name, mounts routes late, and registers /read', () => {
   assert.equal(name, 'dsh-read')
   const { routes, commands, injected } = mount()
-  assert.deepEqual(injected, [['webServer']])
+  assert.deepEqual(injected, [['sessionProjections', 'sessions'], ['sessionQuery'], ['webServer']])
   assert.deepEqual([...routes.keys()].sort(), [
+    '/dsh-read/api/directory-picker',
+    '/dsh-read/api/export',
     '/dsh-read/api/image',
     '/dsh-read/api/library',
     '/dsh-read/api/notes',
@@ -274,10 +278,22 @@ test('host plugin exports its cordis name, mounts routes late, and registers /re
     '/dsh-read/api/paragraphs',
     '/dsh-read/api/progress',
     '/dsh-read/api/start',
+    '/dsh-read/api/vault',
+    '/dsh-read/api/vault/open',
   ])
   assert.ok(commands.has('read'))
   // The typed argument must reach the durable log for the client card to fold.
   assert.notEqual(commands.get('read').recordInput, false)
+})
+
+test('directory picker advertises composed browse/native capability without opening a chooser', async () => {
+  for (const kind of ['browse', 'native']) {
+    const { routes } = mount({ picker: { capability: () => ({ kind }) } })
+    assert.equal((await request(routes, '/dsh-read/api/directory-picker')).payload.kind, kind)
+    const rejected = await request(routes, '/dsh-read/api/directory-picker', { method: 'POST', body: {} })
+    assert.equal(rejected.status, 400)
+  }
+  assert.equal((await request(mount().routes, '/dsh-read/api/directory-picker')).payload.kind, 'unavailable')
 })
 
 test('/read <path> resolves the book and returns its metadata as result text', async () => {

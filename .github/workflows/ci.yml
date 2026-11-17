@@ -22,5 +22,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      # No dependencies and no build step: the suite is the whole pipeline.
+      # Zod validates session-projection state in Host integration tests.
+      # The runtime supplies peer dependencies; do not install the whole Harness.
+      - run: npm install --ignore-scripts --legacy-peer-deps --no-package-lock
       - run: npm test

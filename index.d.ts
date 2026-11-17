@@ -11,6 +11,25 @@ declare function apply(ctx: Context): void
 
 export { apply, name }
 
+/** Stored per book in dsh-read/notes.json; Markdown is an optional readable mirror. */
+export interface ReadingNote {
+  id: string
+  paragraph: number
+  quote: string
+  kind: 'note' | 'question'
+  text: string
+  createdAt: number
+  title?: string
+  progress?: number
+  question?: string
+  answer?: string
+  answerState?: 'pending' | 'answered' | 'interrupted'
+  answerTruncated?: boolean
+  sessionId?: string
+  messageId?: string
+  turn?: number
+}
+
 /** One entry of the table of contents, addressed by paragraph index. */
 export interface BookChapter {
   /** Chapter heading text, or a generated `Section N` fallback. */
@@ -38,6 +57,8 @@ export interface PublicBook {
   /** Total paragraph count; the cursor runs from 0 to `paragraphCount - 1`. */
   paragraphCount: number
   chapters: BookChapter[]
+  /** Snapshot hint; refreshed by the annotations endpoint. */
+  archiveEnabled?: boolean
 }
 
 /** One page of paragraphs, addressed by absolute index. */

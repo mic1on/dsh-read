@@ -30,10 +30,10 @@
 而不是直接跳过。图片按「书 + 序号」取，所以阅读器只能拿到该书自己的包声明过的资源。
 - **空格切换播放。** 点一下卡片让它获得焦点，之后空格就是播放/暂停。绑定在卡片上而不是 window 上
 是刻意的：输入框在同一个文档里，全局监听会把你在输入框里敲的每个空格都变成暂停。
-- **伴读：划词提问，留痕。** 选中一段正文，阅读器会给出「问 AI」和「记一笔」。「问 AI」把问题
-（书名、段落、原文引用）写进输入框，你可以补上自己的说法再发送；「记一笔」完全不经过会话。
-批注按书存在 `$DSH_HOME/dsh-read/notes.json`，**不进对话记录** —— 提问本身已经会在会话里留一条
-消息，再存一份只会把对话淹在几百条碎片里。
+- **伴读：划词提问，Markdown 留痕。** 选中正文可「问 AI」或「记一笔」。问 AI 只填草稿，不代你发送。
+在「阅读中心 → 批注归档」配置目录后，每条批注生成一个 Markdown 文件，按书分目录，Obsidian
+可直接打开。实际发送的问题和该轮全部 AI 正文会自动回填；思考过程与工具结果不导出。
+批注与问答的内部备份存在 `$DSH_HOME/dsh-read/notes.json`，不会为归档额外插入会话消息。
 - **可以往回滚到读过的任何地方。** 已加载的正文是向两端生长的连续区间，不是一页：往上滚会继续
 往前取段并保持你的位置，能一直滚到书的开头。
 - **像回复一样流出。** 段落逐字显现，当前段落带光标。
@@ -119,6 +119,12 @@ bundle 是在启动时合成的，光刷新页面不够。
 > → `book_search({ "query": "三体" })` → `/Users/you/Books/三体.epub`
 > → 然后 `/read /Users/you/Books/三体.epub`
 
+## 批注与 Obsidian
+
+归档的启用、目录选择、迁移、手写内容保护、导出覆盖确认、回答状态和旧宿主兼容说明统一维护在
+[README：Markdown annotations and Obsidian](README.md#markdown-annotations-and-obsidian)。
+实现与安全边界见[批注归档设计](docs/superpowers/specs/2026-11-17-notes-markdown-design.md)。
+
 ## 支持的格式
 
 | 格式 | 解析方式 | 说明 |
@@ -150,16 +156,8 @@ PalmDB 解析、HTML 转文本、段落/章节模型、书库搜索、进度落�
 - `ctx.commands.register({ name: 'read', … })` 解析出一本书，把它的元数据（路径、书名、格式、
   字数、段落数、章节目录）作为命令的 settled result 文本返回。
 - `book_search` 模型工具只把**书库搜索**能力暴露给 Agent，其余什么都不给——它从不返回正文。
-- 五条 JSON 路由支撑阅读中心和阅读卡片，并且是通过 `ctx.inject(['webServer'], …)` 注册的，**不能**
-  放进插件自己的 `inject` 数组：它是可选且晚挂载的服务，否则 headless profile 下插件会永远等待。
-
-| 路由 | 用途 |
-| --- | --- |
-| `GET\|POST /dsh-read/api/library` | 阅读中心的一层目录：子目录、书籍、以及每本书已保存的进度 |
-| `POST /dsh-read/api/start` | 在活着的会话上执行 `/read <path>`，让阅读器出现在对话里；不带会话 ID 时落在唯一在跑的那个会话上 |
-| `GET /dsh-read/api/open?path=` | 解析书籍，返回元数据与章节目录 |
-| `GET /dsh-read/api/paragraphs?path=&from=&count=` | 取一页段落 |
-| `GET\|POST /dsh-read/api/progress` | 读取 / 保存 / 清除阅读位置 |
+- 阅读中心、卡片与批注归档的 HTTP 路由及可选服务接入说明见
+  [README 的实现方式](README.md#how-it-works)；路由和请求字段以 [`index.mjs`](index.mjs) 的注册为准。
 
 `/library` **只解析已经有进度的那几本书**：百分比需要段落总数，那是唯一昂贵的字段，其余部分
 都只是一次目录读取。
@@ -209,18 +207,13 @@ ctx.slots.register({ name: 'conversation.chat.commandview', key: 'read' }, () =>
 
 阅读接口只能读取扩展名在白名单内的文件，`/read` 命令执行同一套白名单——显式给一个非书籍文件会被
 拒绝，而不是当文本解码出来。它不是一个通用的文件读取端点，这一点很重要，因为 DSH 的 Web 服务可能
-被暴露到 loopback 之外。插件唯一会写的是阅读进度和书库根目录配置，且只写在 `$DSH_HOME/dsh-read/`
-下。
+被暴露到 loopback 之外。插件在 `$DSH_HOME/dsh-read/` 下保存配置、阅读进度、批注与问答；启用归档后还会向指定目录写入
+Markdown 和书目录身份文件。只更新/删除身份匹配的插件文件，拒绝符号链接和硬链接逃逸，不提供任意文件读取接口。
 
 ## 开发
 
-```bash
-node --test "test/*.test.mjs"
-```
-
-无依赖、无构建。测试会在内存里现造最小的 EPUB 与 MOBI 容器并用真实解析器读回来，用假的 cordis
-context 驱动 Host 的 `/read` 命令和 HTTP 路由，并验证浏览器 bundle 的加载契约——其中包括重放一次
-`command/run` + `command/done` 折叠，确认它确实产出了阅读节点。
+依赖安装、测试与静态检查命令统一见 [README：Development](README.md#development)。
+无构建步骤；解析器、宿主路由、会话投影及客户端交互的回归测试位于 `test/`。
 
 ### 目录结构
 

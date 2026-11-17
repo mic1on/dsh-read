@@ -19,6 +19,10 @@ import { homedir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 
 import { BOOK_EXTENSIONS, bookImage, loadBook, paragraphWindow, publicBook } from './lib/book.mjs'
+import { NotesStore } from './lib/notes-store.mjs'
+import { mountAnswerCapture, recoverAnswers } from './lib/notes-answers.mjs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
 export const name = 'dsh-read'
 
@@ -31,7 +35,6 @@ const API_PREFIX = '/dsh-read/api'
 const DATA_DIRECTORY = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-read')
 const PROGRESS_FILE = join(DATA_DIRECTORY, 'progress.json')
 const CONFIG_FILE = join(DATA_DIRECTORY, 'config.json')
-const NOTES_FILE = join(DATA_DIRECTORY, 'notes.json')
 const PROGRESS_LIMIT = 300
 
 /** Where `/read <keyword>` and `book_search` look when nothing is configured. */
@@ -257,48 +260,66 @@ async function writeProgressEntry(entry) {
   return progress
 }
 
-/* ── annotations (伴读: questions asked and notes kept while reading) ─────── */
+/* ── annotations and their Markdown archive ─────────────────────────────── */
 
-/**
- * One book's annotations, oldest first.
- *
- * Deliberately *not* stored in the session log. Asking about a passage inserts a normal user
- * message, so the conversation already carries the exchange; keeping a second copy there
- * would scatter hundreds of fragments through the transcript and bury it. This file is the
- * reader's own index — "where was I confused" — and stays independent of any session.
- */
-async function readNotes() {
-  const notes = await readJson(NOTES_FILE, {})
-  return notes && typeof notes === 'object' && !Array.isArray(notes) ? notes : {}
-}
+const notesStore = new NotesStore(DATA_DIRECTORY)
+const openDirectory = promisify(execFile)
 
-const NOTE_LIMIT = 2000
-
-/** Append one annotation, returning it with its assigned id. */
-async function addNote(entry) {
-  const notes = await readNotes()
-  const forBook = Array.isArray(notes[entry.path]) ? notes[entry.path] : []
-  const note = {
-    id: `${Date.now().toString(36)}-${(forBook.length + 1).toString(36)}`,
-    paragraph: Number.isFinite(entry.paragraph) ? Math.max(0, Math.floor(entry.paragraph)) : 0,
-    quote: String(entry.quote ?? '').slice(0, 400),
-    kind: entry.kind === 'note' ? 'note' : 'question',
-    text: String(entry.text ?? '').slice(0, 2000),
-    createdAt: Date.now(),
+async function noteMetadata(path) {
+  try {
+    const book = await loadBook(path)
+    const progress = (await readJson(PROGRESS_FILE, {}))[path]
+    return {
+      title: book.title || book.name,
+      ...(progress && book.paragraphCount > 0
+        ? { progress: Math.min(100, Math.max(0, progress.index / book.paragraphCount * 100)) }
+        : {}),
+    }
+  } catch {
+    // Existing annotations remain exportable even when the original book moved.
+    return {}
   }
-  forBook.push(note)
-  // Keep the newest per book; a reader cannot use an unbounded list anyway.
-  notes[entry.path] = forBook.slice(-NOTE_LIMIT)
-  await writeJson(NOTES_FILE, notes)
-  return note
 }
 
-async function removeNote(bookPath, id) {
-  const notes = await readNotes()
-  const forBook = Array.isArray(notes[bookPath]) ? notes[bookPath] : []
-  notes[bookPath] = forBook.filter((note) => note.id !== id)
-  await writeJson(NOTES_FILE, notes)
-  return notes[bookPath]
+/** Shared Host operations: the UI routes and reading_notes tool use this same face. */
+async function readingNotesOperation(args = {}) {
+  switch (args.action) {
+    case 'status': return notesStore.status()
+    case 'configure': {
+      if (typeof args.path !== 'string') throw new Error('missing archive path')
+      return notesStore.setVault(args.path)
+    }
+    case 'export': {
+      if (args.confirmOverwrite !== true) return {
+        confirmationRequired: true,
+        message: '全量导出将覆盖同 ID 插件文件中的手写内容，无关文件保留。请先取得用户明确同意，再传入 confirmOverwrite: true；当前未执行导出。',
+      }
+      return notesStore.exportAll({ overwrite: true })
+    }
+    case 'list': {
+      const notes = await notesStore.notes()
+      return { notes: args.path ? notes[resolve(args.path)] || [] : notes }
+    }
+    case 'add': {
+      const path = await requireBookPath(args.path)
+      return notesStore.add({ ...args, path, kind: args.kind || 'note' }, await noteMetadata(path))
+    }
+    case 'remove': {
+      const path = await requireBookPath(args.path)
+      if (!args.id) throw new Error('missing note id')
+      return notesStore.remove(path, String(args.id))
+    }
+    case 'open': {
+      const { path } = await notesStore.status()
+      if (!path) throw new Error('请先设置批注保存目录')
+      if (!(await stat(path)).isDirectory()) throw new Error('批注保存位置不是目录')
+      if (process.platform === 'darwin') await openDirectory('/usr/bin/open', [path], { timeout: 10000 })
+      else if (process.platform === 'win32') await openDirectory('explorer.exe', [path], { timeout: 10000 })
+      else await openDirectory('xdg-open', [path], { timeout: 10000 })
+      return { path }
+    }
+    default: throw new Error('unknown reading notes action')
+  }
 }
 
 /* ── library (the 阅读 tab's data) ───────────────────────────────────────── */
@@ -318,10 +339,11 @@ async function primaryLibraryDirectory() {
 
 /** Make one directory primary while keeping the other library roots for search. */
 async function setPrimaryLibraryDirectory(directory) {
-  const config = await readJson(CONFIG_FILE, {})
-  const roots = Array.isArray(config.libraryRoots) ? config.libraryRoots : []
-  const kept = roots.filter((root) => typeof root === 'string' && root.trim() && root !== directory)
-  await writeJson(CONFIG_FILE, { ...config, libraryRoots: [directory, ...kept] })
+  await notesStore.configure((config) => {
+    const roots = Array.isArray(config.libraryRoots) ? config.libraryRoots : []
+    const kept = roots.filter((root) => typeof root === 'string' && root.trim() && root !== directory)
+    return { ...config, libraryRoots: [directory, ...kept] }
+  })
 }
 
 /**
@@ -404,6 +426,17 @@ async function libraryListing(requested) {
 
 export function apply(ctx) {
   const disposers = []
+  const activations = []
+  let closing = false
+  // Own teardown before starting any asynchronous imports or optional activation.
+  ctx.effect(() => async () => {
+    closing = true
+    await Promise.allSettled(activations)
+    for (const dispose of disposers.splice(0)) {
+      try { await dispose() } catch { /* already gone */ }
+    }
+    await notesStore.tail
+  })
 
   // `/read` is the whole entry point: the handler resolves one book and returns
   // its metadata as the settled result text. The browser half folds the durable
@@ -423,7 +456,7 @@ export function apply(ctx) {
           .trim()
         try {
           const entry = await loadBook(await resolveBookArgument(argument))
-          return { kind: 'success', text: JSON.stringify(publicBook(entry)) }
+          return { kind: 'success', text: JSON.stringify({ ...publicBook(entry), archiveEnabled: await notesStore.archiveEnabled() }) }
         } catch (error) {
           return { kind: 'error', text: messageOf(error) }
         }
@@ -434,11 +467,41 @@ export function apply(ctx) {
   // Natural-language discovery: the agent finds a book, the user opens it with /read.
   // Imported lazily so the plugin still loads where `@deepseek-ai/dsh-tools` is not
   // resolvable (plain-node tests, headless profiles).
-  void import('./lib/tool.mjs')
-    .then(({ registerBookSearch }) => disposers.push(registerBookSearch(ctx, searchBooks)))
+  activations.push(import('./lib/tool.mjs')
+    .then(({ registerBookSearch }) => { if (!closing) disposers.push(registerBookSearch(ctx, searchBooks)) })
     .catch(() => {
       // book_search unavailable; /read still works from a path or keyword
+    }))
+
+  activations.push(import('./lib/notes-tool.mjs')
+    .then(({ registerReadingNotes }) => { if (!closing) disposers.push(registerReadingNotes(ctx, readingNotesOperation)) })
+    .catch(() => { /* plain Node without tool peers: HTTP remains usable */ }))
+
+  // Projection registration is awaited before listeners are published. Old hosts without
+  // these optional capabilities still read books and save annotations normally.
+  ctx.inject(['sessionProjections', 'sessions'], async (captureCtx) => {
+    const { z } = await import('zod')
+    if (closing) return
+    const active = z.object({
+      turn: z.number(), startedAt: z.number(),
+      questions: z.array(z.object({ id: z.string(), messageId: z.string(), question: z.string(), answer: z.string() })),
+      answer: z.string(), truncated: z.boolean(), interrupted: z.boolean(),
     })
+    const stateSchema = z.object({
+      inheritedEventCount: z.number(), active: active.nullable(),
+      records: z.array(active.extend({ ended: z.boolean(), completed: z.boolean(), finishedAt: z.number() })),
+    })
+    const dispose = await mountAnswerCapture(captureCtx, notesStore, { stateSchema })
+    if (closing) { await dispose(); return }
+    disposers.push(dispose)
+    captureCtx.effect(() => dispose)
+  })
+  ctx.inject(['sessionQuery'], (queryCtx) => {
+    const recovery = recoverAnswers(notesStore, queryCtx.sessionQuery).catch((error) => {
+      notesStore.lastError = `问答恢复失败：${messageOf(error)}`
+    })
+    queryCtx.effect(() => async () => { await recovery })
+  })
 
   // The reader card pages through paragraphs over HTTP. `webServer` is optional
   // and published late, so it is attached through ctx.inject rather than the
@@ -448,9 +511,17 @@ export function apply(ctx) {
       disposers.push(webCtx.webServer.register({ kind: 'exact', path, handler: route(run) }))
     }
 
+    // Advertise the actual composed interaction; native pick() and browse list()
+    // are deliberately different capabilities, not interchangeable fallbacks.
+    register(`${API_PREFIX}/directory-picker`, async (req) => {
+      if (req.method !== 'GET') throw new Error('method not allowed')
+      const picker = webCtx.get('directoryPicker')
+      return { ok: true, kind: picker ? picker.capability().kind : 'unavailable' }
+    })
+
     register(`${API_PREFIX}/open`, async (req) => {
       const entry = await loadBook(await requireBookPath(parameters(req).get('path')))
-      return { ok: true, book: publicBook(entry) }
+      return { ok: true, book: { ...publicBook(entry), archiveEnabled: await notesStore.archiveEnabled() } }
     })
 
     register(`${API_PREFIX}/paragraphs`, async (req) => {
@@ -483,23 +554,32 @@ export function apply(ctx) {
       return undefined
     })
 
-    // Annotations for one book, or for every book when no path is given (the reading
-    // centre lists them across the library).
     register(`${API_PREFIX}/notes`, async (req) => {
       if (req.method === 'POST') {
         const body = await readJsonBody(req)
-        if (body.remove) {
-          const target = await requireBookPath(body.path)
-          return { ok: true, notes: await removeNote(target, String(body.remove)) }
-        }
-        const target = await requireBookPath(body.path)
-        const note = await addNote({ ...body, path: target })
-        return { ok: true, note }
+        const result = await readingNotesOperation(body.remove
+          ? { action: 'remove', path: body.path, id: body.remove }
+          : { ...body, kind: body.kind === undefined ? 'question' : body.kind, action: 'add' })
+        return { ok: true, ...result }
       }
-      const requested = parameters(req).get('path')
-      const notes = await readNotes()
-      if (!requested) return { ok: true, notes }
-      return { ok: true, notes: notes[resolve(requested)] ?? [] }
+      const result = await readingNotesOperation({ action: 'list', path: parameters(req).get('path') })
+      return { ok: true, ...result, archiveEnabled: await notesStore.archiveEnabled() }
+    })
+
+    register(`${API_PREFIX}/vault`, async (req) => {
+      if (req.method !== 'GET' && req.method !== 'POST') throw new Error('method not allowed')
+      const result = req.method === 'POST'
+        ? await readingNotesOperation({ action: 'configure', path: (await readJsonBody(req)).path })
+        : await readingNotesOperation({ action: 'status' })
+      return { ok: true, ...result }
+    })
+    register(`${API_PREFIX}/export`, async (req) => {
+      if (req.method !== 'POST') throw new Error('method not allowed')
+      return { ok: true, ...(await readingNotesOperation({ action: 'export', confirmOverwrite: true })) }
+    })
+    register(`${API_PREFIX}/vault/open`, async (req) => {
+      if (req.method !== 'POST') throw new Error('method not allowed')
+      return { ok: true, ...(await readingNotesOperation({ action: 'open' })) }
     })
 
     register(`${API_PREFIX}/progress`, async (req) => {
@@ -561,13 +641,4 @@ export function apply(ctx) {
     })
   })
 
-  ctx.effect(() => () => {
-    for (const dispose of disposers.splice(0)) {
-      try {
-        dispose()
-      } catch {
-        // already gone
-      }
-    }
-  })
 }
