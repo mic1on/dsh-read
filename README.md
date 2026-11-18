@@ -124,6 +124,20 @@ conversation header stays down to the two views that belong to a session.
   paragraph and percentage while you drag. A book that was never opened has no paragraph count
   yet, so the page parses it first and then shows the slider.
 - **空格 暂停/继续** — click the card to focus it, then space toggles playback.
+- **排版** in the card's bottom control bar opens the reading layout controls. Changes preview
+  immediately and save automatically. **字号** sets 12–28px in 0.5px steps (default 14.5px);
+  **行距** sets 1.4–2.4 in 0.05 steps (default 1.95); **正文宽度** chooses full width (default),
+  560px, 720px or 900px, always shrinking to fit the available card width. Illustrations share
+  that width and keep their aspect ratio. **恢复默认** restores only these three settings.
+  Preferences apply across books and sessions in the current browser and site, stored as
+  versioned JSON under `dsh-read:typography` in localStorage. Cards already open in the same
+  page update together; other tabs pick up saved choices when reloaded. They do not sync
+  across browsers, devices or sites. Missing fields, malformed data and unsupported versions
+  fall back safely; storage failures keep the current page's choice in memory.
+  Layout changes preserve the current paragraph, revealed text, reading progress and playback
+  state, and do not style the composer or other messages. Tab reaches each native control;
+  arrow keys adjust sliders and the width menu. Focus keeps the control bar visible, and it
+  scrolls internally in short windows.
 - **重置进度** clears one book's position.
 
 Setting or resetting progress also invalidates that book's old card positions in this window and
@@ -316,6 +330,10 @@ No build step; Zod validates Host session-projection state. The tests build mini
 and read them back through the real parsers, drive the host's `/read` command and HTTP routes
 against a fake cordis context, and verify the browser bundle's loader contract — including a
 replay of the `command/run` + `command/done` fold that produces the reader node.
+Typography coverage includes persistence, legacy/corrupt data, storage failures, reset,
+cross-card updates, playback/progress isolation, scroll following and layout CSS regressions
+in `test/client.test.mjs`. Browser verification details and a repeatable layout checklist are in
+[the typography QA record](docs/superpowers/specs/2026-11-18-reading-typography-qa.md).
 
 ### GitHub Releases
 
