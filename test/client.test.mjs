@@ -1342,11 +1342,13 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
   const book = { ...CARD_BOOK, paragraphCount: paragraphs.length }
   let progress = {}
   const writes = []
+  const reads = []
   const { registered } = mount(react, {
     globals: { window, document, localStorage,
       setTimeout: (fn, delay) => { timers.set(++seq, { fn, delay }); return seq },
       clearTimeout: (id) => timers.delete(id) },
     fetch: async (url, options) => {
+      if (!options) reads.push(url)
       if (url.includes('/paragraphs?')) return response({ ok: true, from: 0,
         items: paragraphs.map((text, i) => ({ text, offset: i })) })
       if (url === '/dsh-read/api/progress' && options) {
@@ -1387,7 +1389,8 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
     return field.props
   }
   t.after(() => { reader.unmount(); settings.unmount() })
-  const view = { window, document, values, render, open, tick, position, control, writes,
+  const view = { window, document, values, render, open, tick, position, control, writes, reads,
+    savedProgress: () => progress[book.path],
     unmount() { reader.unmount() },
     persist() {
       for (const [id, timer] of [...timers]) {
@@ -1525,7 +1528,7 @@ test('关闭自动暂停后，首段内手动暂停仍跨卸载保留精确光�
   assert.equal(view.tick(), false)
 })
 
-for (const index of [null, 2]) {
+for (const index of [null, 2, 3]) {
   for (const unmounted of [true, false]) {
     test(`明确${index === null ? '重置' : '设置'}进度使${unmounted ? '已卸载' : '仍挂载'}阅读器的旧光标失效`, async (t) => {
       const view = playbackFixture(t)
@@ -1538,17 +1541,79 @@ for (const index of [null, 2]) {
       const saved = view.writes.length
       view.persist()
       assert.equal(view.writes.length, saved, 'stale debounce must not overwrite explicit progress')
+      const loads = view.reads.filter((url) => url.includes('/paragraphs?')).length
       if (unmounted) await view.remount()
-      else await view.open()
+      else {
+        await view.open()
+        assert.equal(view.reads.filter((url) => url.includes('/paragraphs?')).length, loads,
+          'invalidation must not reload a mounted background reader')
+      }
+      view.persist()
+      assert.equal(view.writes.length, saved)
+      if (index === null) assert.equal(view.savedProgress(), undefined)
       view.switchTo('reader')
+      await view.open()
+      view.persist()
+      assert.equal(view.writes.length, saved, 'returning without a reading step must not write')
+      if (index === 3) {
+        assert.ok(labeledButton(view.render(), '重新开始'))
+        assert.equal(view.tick(), false)
+        assert.equal(view.savedProgress().index, 3)
+        return
+      }
       const current = elements(view.render()).find((el) => el.props['data-paragraph'] === String(index ?? 0))
       assert.equal(current.children[0], '', 'explicit progress starts at the new paragraph, without stale characters')
       assert.equal(view.position(), index === null ? undefined : '春风又绿江南岸')
+      if (index !== null) labeledButton(view.render(), '播放').props.onClick()
+      assert.ok(view.tick())
       view.persist()
-      assert.equal(view.writes.at(-1).index, index ?? 0)
+      assert.equal(view.writes.length, saved + 1)
+      assert.equal(view.savedProgress().index, index === null ? 1 : 3)
     })
   }
 }
+
+test('关闭自动暂停时重置仍保持未读，直到返回并实际阅读', async (t) => {
+  const view = playbackFixture(t, [['dsh-read:auto-pause', 'false']])
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  view.switchTo('other')
+  await view.editProgress(null)
+  await view.open()
+  assert.equal(view.tick(), false)
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  await view.remount()
+  assert.equal(view.tick(), false)
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  view.switchTo('reader')
+  await view.open()
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  assert.ok(view.tick())
+  view.persist()
+  assert.equal(view.savedProgress().index, 1)
+})
+
+test('前台明确设置进度后主动播放才同步位置，加载不写回', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  const loads = view.reads.filter((url) => url.includes('/paragraphs?')).length
+  await view.editProgress(2)
+  await view.open()
+  assert.equal(view.reads.filter((url) => url.includes('/paragraphs?')).length, loads)
+  assert.equal(view.tick(), false)
+  labeledButton(view.render(), '播放').props.onClick()
+  await view.open()
+  view.persist()
+  assert.equal(view.savedProgress().index, 2)
+  assert.equal(view.writes.length, 1)
+  assert.ok(view.tick())
+  view.persist()
+  assert.equal(view.savedProgress().index, 3)
+})
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */
 
