@@ -3,7 +3,7 @@
 // persistence. Fixtures are real EPUB files built in memory by the ZIP writer below.
 
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
@@ -274,6 +274,7 @@ test('host plugin exports its cordis name, mounts routes late, and registers /re
     '/dsh-read/api/image',
     '/dsh-read/api/library',
     '/dsh-read/api/notes',
+    '/dsh-read/api/notes/locate',
     '/dsh-read/api/open',
     '/dsh-read/api/paragraphs',
     '/dsh-read/api/progress',
@@ -665,6 +666,105 @@ test('an annotation is clamped, so a stray payload cannot grow without bound', a
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('locate returns a verified distant paragraph, scopes IDs to the book and does not change notes or progress', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-location-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'book.txt')
+  const other = join(directory, 'other.txt')
+  const paragraphs = Array.from({ length: 160 }, (_, i) => `这是第 ${i} 段的唯一内容。`)
+  await writeFile(path, paragraphs.join('\n\n'))
+  await writeFile(other, '其他书籍')
+  const { routes } = mount()
+  const add = async (book, paragraph, quote) => (await request(routes, '/dsh-read/api/notes', {
+    method: 'POST', body: { path: book, paragraph, quote, kind: 'note', text: '笔记' },
+  })).payload.note
+  const first = await add(path, 130, paragraphs[130])
+  const second = await add(path, 130, '唯一内容。')
+  const alien = await add(other, 0, '其他书籍')
+  const list = (await request(routes, `/dsh-read/api/notes?path=${encodeURIComponent(path)}`)).payload.notes
+  assert.deepEqual(list.map((note) => note.id), [first.id, second.id])
+  await request(routes, '/dsh-read/api/progress', { method: 'POST', body: { path, index: 7 } })
+  const progressBefore = (await request(routes, '/dsh-read/api/progress')).payload.progress
+  const locate = (id, method = 'GET') => request(routes,
+    `/dsh-read/api/notes/locate?path=${encodeURIComponent(path)}&id=${encodeURIComponent(id)}`, { method })
+  const located = await locate(first.id)
+  assert.equal(located.payload.ok, true)
+  assert.equal(located.payload.book.path, path)
+  assert.equal(located.payload.book.paragraphCount, 160)
+  assert.equal(located.payload.index, 130)
+  assert.equal(located.payload.items[130 - located.payload.from].text, paragraphs[130])
+  assert.match(located.payload.book.revision, /^[a-f0-9]{64}$/)
+  assert.equal((await locate(alien.id)).payload.ok, false)
+  assert.equal((await locate(first.id, 'POST')).status, 400)
+  assert.equal((await locate('')).payload.ok, false)
+  assert.match((await locate(second.id)).payload.error, /多个段落/)
+  assert.deepEqual((await request(routes, '/dsh-read/api/progress')).payload.progress, progressBefore)
+  assert.deepEqual((await request(routes, `/dsh-read/api/notes?path=${encodeURIComponent(path)}`)).payload.notes, list)
+  await request(routes, '/dsh-read/api/notes', { method: 'POST', body: { path, remove: first.id } })
+  assert.match((await locate(first.id)).payload.error, /不存在/)
+})
+
+test('locate rejects changed, shifted, missing and unreadable books even after caching; list remains available', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-location-changes-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'book.txt')
+  const original = '开头\n\n唯一原文摘录\n\n结尾'
+  await writeFile(path, original)
+  const { routes } = mount()
+  const saved = (await request(routes, '/dsh-read/api/notes', {
+    method: 'POST', body: { path, paragraph: 1, quote: '唯一原文摘录' },
+  })).payload.note
+  const url = `/dsh-read/api/notes/locate?path=${encodeURIComponent(path)}&id=${saved.id}`
+  const first = (await request(routes, url)).payload
+  assert.equal(first.ok, true)
+  for (const changed of ['开头\n\n改写的段落\n\n结尾', '插入前文\n\n' + original, '只有一段']) {
+    await writeFile(path, changed)
+    assert.equal((await request(routes, url)).payload.ok, false)
+    const stalePage = await request(routes, `/dsh-read/api/paragraphs?path=${encodeURIComponent(path)}&revision=${first.book.revision}`)
+    assert.match(stalePage.payload.error, /内容已变化/)
+  }
+  await writeFile(path, '')
+  assert.match((await request(routes, url)).payload.error, /无法读取原书/)
+  await rm(path)
+  assert.match((await request(routes, url)).payload.error, /移动、删除或不可用/)
+  assert.equal((await request(routes, `/dsh-read/api/notes?path=${encodeURIComponent(path)}`)).payload.notes[0].id, saved.id)
+  await writeFile(path, original)
+  assert.equal((await request(routes, url)).payload.ok, true, 'retry works after restoring the original')
+})
+
+test('notes read failure is explicit and retry preserves the stored data', async () => {
+  const file = join(sandboxHome, 'dsh-read', 'notes.json')
+  const original = await readFile(file, 'utf8')
+  const { routes } = mount()
+  try {
+    await writeFile(file, '{broken')
+    const failed = await request(routes, '/dsh-read/api/notes?path=/books/a.txt')
+    assert.equal(failed.payload.ok, false)
+    assert.ok(failed.payload.error)
+    assert.equal(await readFile(file, 'utf8'), '{broken')
+  } finally { await writeFile(file, original) }
+  assert.equal((await request(routes, '/dsh-read/api/notes?path=/books/a.txt')).payload.ok, true)
+})
+
+test('locate sees an unpacked EPUB spine change without relying on the parent directory timestamp', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-location-unpacked-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'book.epub')
+  await writeUnpackedEpub(path)
+  const { routes } = mount()
+  const page = (await request(routes, `/dsh-read/api/paragraphs?path=${encodeURIComponent(path)}`)).payload
+  const saved = (await request(routes, '/dsh-read/api/notes', {
+    method: 'POST', body: { path, paragraph: 1, quote: page.items[1].text },
+  })).payload.note
+  const url = `/dsh-read/api/notes/locate?path=${encodeURIComponent(path)}&id=${saved.id}`
+  const located = (await request(routes, url)).payload
+  assert.equal(located.ok, true)
+  await writeFile(join(path, 'ch1.xhtml'), '<html><body><h1>第一章</h1><p>完全替换的正文</p></body></html>')
+  assert.equal((await request(routes, url)).payload.ok, false)
+  const next = await request(routes, `/dsh-read/api/paragraphs?path=${encodeURIComponent(path)}&revision=${located.book.revision}`)
+  assert.match(next.payload.error, /内容已变化/)
 })
 
 test('an unpacked EPUB is listed as a book, not offered as a directory', async () => {

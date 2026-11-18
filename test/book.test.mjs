@@ -243,3 +243,21 @@ test('loadBook reads an EPUB and a MOBI from disk', async () => {
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('book cache refreshes same-size edits, explicit fresh reads and deleted files', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-cache-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'book.txt')
+  await writeFile(path, '开头\n\n原文')
+  const original = await loadBook(path)
+  assert.equal(await loadBook(path), original, 'unchanged files reuse the cached parse')
+  const fresh = await loadBook(path, { fresh: true })
+  assert.notEqual(fresh, original)
+  assert.equal(fresh.revision, original.revision)
+  await writeFile(path, '开头\n\n改写')
+  const changed = await loadBook(path)
+  assert.equal(changed.paragraphs[1].text, '改写')
+  assert.notEqual(changed.revision, original.revision)
+  await rm(path)
+  await assert.rejects(loadBook(path), /file not found/)
+})

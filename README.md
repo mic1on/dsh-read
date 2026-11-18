@@ -51,6 +51,10 @@ framing and send it yourself; 记一笔 records it without involving a session a
 and captured questions/answers are stored per book under `$DSH_HOME/dsh-read/notes.json`.
 Configure an archive directory in 阅读中心 → 批注归档 to mirror each annotation as a Markdown file
 in a book folder. Completed AI answers are filled in automatically; no duplicate chat messages are inserted.
+- **Review annotations and return to the text.** Click 批注 in a reader's controls for that
+book's list, or click a passage's annotation mark to expand every annotation on that paragraph.
+The reader pauses while you review; 返回阅读 keeps your character position paused until you press 播放.
+See [reviewing annotations](#reviewing-annotations) for answer states and location rules.
 - **Scroll back through everything you have read.** The loaded run grows in both
 directions instead of being one page: scrolling up pulls in earlier paragraphs and keeps
 your place, so you can reach the start of the book.
@@ -250,6 +254,46 @@ command you typed.
 
 Because each `/read` is its own lifecycle, several reader cards can coexist in one session and
 each keeps its own position.
+
+## Reviewing annotations
+
+Open a book with `/read <path-or-keyword>`, then click **批注** in its controls. Only that book's
+annotations are listed, in paragraph and creation order. Expand an entry to read its quote,
+personal note, submitted question and saved answer. A passage's annotation mark opens the same
+panel filtered to that paragraph and expands all its entries; **全部批注** returns to the full list.
+The panel scrolls inside the reader, including long answers. Text is displayed as plain text with
+line breaks, so saved Markdown syntax remains visible.
+
+**刷新** reloads the saved records, including answers archived since you opened the panel.
+The panel does not poll or request a new AI response. Loading, an empty book/paragraph and read
+errors have separate feedback; **重试** retries a failed read. A failed refresh labels any retained
+records as the previous result. Browsing or refreshing annotations does not change reading progress.
+
+Answer labels describe the saved JSON:
+
+| Label | Meaning |
+| --- | --- |
+| 已保存回答 | A completed, nonempty saved answer |
+| 回答尚未完成或尚未归档 | Pending; the draft may be unsent or capture has not finished |
+| 回答未完成 | Interrupted; any saved partial text remains readable |
+| 回答已截断 | Saved text reached the capture limit; it is not a complete answer |
+| 回答不可用 | Missing/unknown legacy status, or an answered record without answer text |
+
+**定位原文** reloads the original book from disk and verifies the saved annotation ID, paragraph
+and quote. It only jumps when the quote matches its original paragraph and appears in no other
+paragraph, normalizing whitespace but keeping punctuation exact. The returned window includes
+the whole target paragraph, highlights it, scrolls/focuses it into view and stays paused. A successful
+location becomes the normal resume paragraph; **播放** continues from the displayed paragraph.
+If the file moved/disappeared, the paragraph shifted/changed, the quote is empty, or it occurs in
+several paragraphs, an explicit error leaves your position unchanged and offers **重试定位**.
+There is no automatic relocation after edits. Restore the original book at its original path and retry,
+or inspect the saved quote and navigate manually. Further pagination refuses a different content
+revision and asks you to reopen the book, rather than mixing paragraphs from different versions.
+
+The list reads the plugin's JSON backup and remains available even when the book file is missing.
+Manual edits made only in Obsidian/Markdown files are not imported into this view. No archive
+directory is required for reviewing already saved annotations. See the
+[implementation design](docs/superpowers/specs/2026-11-18-annotation-review-design.md).
 
 ## Markdown annotations and Obsidian
 

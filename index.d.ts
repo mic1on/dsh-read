@@ -56,6 +56,8 @@ export interface PublicBook {
   bytes: number
   /** Total paragraph count; the cursor runs from 0 to `paragraphCount - 1`. */
   paragraphCount: number
+  /** Parsed content revision; optional for reader cards recorded by older versions. */
+  revision?: string
   chapters: BookChapter[]
   /** Snapshot hint; refreshed by the annotations endpoint. */
   archiveEnabled?: boolean
