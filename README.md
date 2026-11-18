@@ -317,6 +317,26 @@ and read them back through the real parsers, drive the host's `/read` command an
 against a fake cordis context, and verify the browser bundle's loader contract — including a
 replay of the `command/run` + `command/done` fold that produces the reader node.
 
+### GitHub Releases
+
+`package.json` is the release version source. Bump its SemVer version and merge to `main`;
+after both Node 22 and Node 24 CI tests pass, CI creates `v<version>` at the tested commit
+and publishes a GitHub Release with automatically generated release notes. No manual tag,
+npm publishing, build step, or extra secret is required. Only the release job receives
+`contents: write` through the repository's `GITHUB_TOKEN`; repository rules must allow it
+to create tags and releases. Pull requests never publish.
+
+The first successful main run also publishes the current version if missing (initially
+`v0.3.0`). Already published versions are skipped, including later commits without a version
+bump. Prerelease versions such as `0.4.0-rc.1` are marked as prereleases, not latest.
+
+If publishing fails after tag creation, re-run the failed CI job for the **same commit**.
+A matching lightweight or annotated tag is reused; a tag pointing elsewhere or an existing
+draft release fails for manual review, without overwriting either. API/permission failures
+fail the job rather than being treated as a missing release. Release jobs are serialized
+without cancelling an active publisher. To ship a fix, bump the version again instead of
+moving a published tag.
+
 ### Layout
 
 ```

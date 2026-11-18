@@ -220,6 +220,21 @@ Markdown 和书目录身份文件。只更新/删除身份匹配的插件文件�
 依赖安装、测试与静态检查命令统一见 [README：Development](README.md#development)。
 无构建步骤；解析器、宿主路由、会话投影及客户端交互的回归测试位于 `test/`。
 
+### GitHub 自动发版
+
+升级 `package.json` 中的 SemVer 版本并合入 `main` 即可：Node 22 / 24 两组 CI 测试通过后，
+自动在测试对应提交创建 `v<版本号>` tag 和 GitHub Release，并自动生成更新说明。
+不需要手动打 tag，不发布 npm 包，也不需要构建或额外密钥；仅发布 job 使用 `GITHUB_TOKEN`
+的 `contents: write` 权限，仓库规则须允许创建 tag 和 Release。PR 不会触发发布。
+
+首次启用会补发当前尚未发布的版本（初始为 `v0.3.0`）。已发布版本直接跳过，普通代码修改不会重复发版；
+`0.4.0-rc.1` 等预发布版本标记为 prerelease，不设为 latest。
+
+若 tag 创建成功但 Release 发布失败，在 Actions 中重新运行**同一提交**的失败 job 即可复用 tag。
+已有轻量或附注 tag 若指向其他提交，或存在同名 draft Release，则报错交由人工处理，不覆盖原内容。
+API / 权限错误会使 job 失败，不会误判为版本不存在。发布 job 串行执行，不取消正在进行的发布。
+修复已发布版本时应再次升级版本号，不要移动已有 tag。
+
 ### 目录结构
 
 ```
