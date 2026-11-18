@@ -40,7 +40,11 @@ document, so a global listener would turn every space you type into a pause.
 tabs, minimising, focusing another app, or switching to a different DSH conversation stops the
 typewriter exactly where it is — including mid-word. Returning automatically resumes from
 that character, but a manually paused reader stays paused. Clicking the composer in the same
-conversation is not "leaving"; turning the switch off disables the behaviour.
+conversation is not "leaving"; turning the switch off disables automatic pausing on departure.
+The switch is remembered in this browser's `localStorage` (only in memory if storage is unavailable).
+Exact character positions and manual-pause state are cached per reader card in the current window,
+not saved to disk; a page reload or a new window falls back to the saved paragraph. Returning to
+an existing card is different from issuing a new `/read` command.
 - **伴读：划词提问，留痕。** Select a passage and the reader offers 问 AI or 记一笔. 问 AI writes
 the question — book, paragraph and quote — into the composer, so you can add your own
 framing and send it yourself; 记一笔 records it without involving a session at all. Notes
@@ -103,8 +107,16 @@ conversation header stays down to the two views that belong to a session.
   primary library root and is remembered from then on.
 - Subdirectories are listed first, so you can walk down to where your books live.
 - Every book shows its format, size and progress (`已读 5.9% · 第 124 / 2083 段`, or 未开始).
-- Filter the current directory with **全部 / 在读 / 未读** (all / reading / unread). Any saved progress counts as reading, including 0% and completed books; no record means unread. Subdirectories remain visible.
-- Sort by **reading progress / last-read time**, ascending or descending; newest first is the default, with book-name tie-breaking. Last-read time uses the last progress save, including manual position changes. Unread books and missing timestamps stay last for time sorting; unread progress is 0%. Choices last until the settings page is unmounted.
+- Filter the current directory with **全部 / 在读 / 未读** (all / reading / unread); **全部** is the
+  default. Any saved progress counts as reading, including 0% and completed books; no record means
+  unread. Subdirectories stay first, outside filtering and sorting. An empty filtered result offers
+  **查看全部**; changing the filter closes the progress editor.
+- Sort by **reading progress / last-read time**, ascending or descending; newest first is the default.
+  Ties use Chinese-locale book-name order, then path order, both ascending. Last-read time uses the
+  last progress save, including manual position changes, not time spent reading. Unread books and
+  missing or invalid timestamps stay last in either time-sort direction; unread progress is 0%.
+  Filter and sort choices survive data refreshes and directory changes until the settings page is
+  unmounted; they are not saved as preferences.
 - **开始阅读 / 继续阅读** runs the same `/read` command in the session the shell currently has
   selected, then closes settings so you land on the card, resuming from the saved paragraph.
 - **设置进度** opens a slider under the book so you can move its position anywhere — for a book
@@ -113,6 +125,13 @@ conversation header stays down to the two views that belong to a session.
   yet, so the page parses it first and then shows the slider.
 - **空格 暂停/继续** — click the card to focus it, then space toggles playback.
 - **重置进度** clears one book's position.
+
+Setting or resetting progress also invalidates that book's old card positions in this window and
+stops their playback, even with auto-pause disabled. A mounted card reloads the saved position when
+you return to it or use a playback/seek control; a completed book stays complete. Reset leaves the
+book unread until you actually read in the foreground or seek, rather than creating progress merely
+by loading the card. If the initial text load or this position reload fails, return focus to the
+reader or use **播放 / 下一段** to retry; loading alone does not save progress.
 
 ### The /read command
 
