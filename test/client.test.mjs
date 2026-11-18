@@ -1323,7 +1323,7 @@ test('移除数量提示后，书库加载失败仍显示错误并在下次成�
 
 /* ── background playback and exact cursor restoration ──────────────────── */
 
-function playbackFixture(t, stored) {
+function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸', '尾声']) {
   const window = new EventTarget()
   const document = Object.assign(new EventTarget(), {
     hidden: false, visibilityState: 'visible', hasFocus: () => true,
@@ -1339,16 +1339,23 @@ function playbackFixture(t, stored) {
   // A remount needs fresh hook state, but the *same* loaded plugin and window.
   const react = Object.fromEntries(Object.keys(createReact().React).map((name) =>
     [name, (...args) => owner.React[name](...args)]))
-  const paragraphs = ['甲', '春风又绿江南岸', '尾声']
   const book = { ...CARD_BOOK, paragraphCount: paragraphs.length }
+  let progress = {}
+  const writes = []
   const { registered } = mount(react, {
     globals: { window, document, localStorage,
       setTimeout: (fn, delay) => { timers.set(++seq, { fn, delay }); return seq },
       clearTimeout: (id) => timers.delete(id) },
-    fetch: async (url) => {
+    fetch: async (url, options) => {
       if (url.includes('/paragraphs?')) return response({ ok: true, from: 0,
         items: paragraphs.map((text, i) => ({ text, offset: i })) })
-      return response({ ok: true, progress: {}, notes: [] })
+      if (url === '/dsh-read/api/progress' && options) {
+        const body = JSON.parse(options.body)
+        writes.push(body)
+        progress = body.clear ? {} : { [body.path]: body }
+      }
+      return response({ ok: true, progress, notes: [], dir: '/books', directories: [],
+        books: [{ ...book, extension: 'epub', progress: { index: 1, paragraphCount: paragraphs.length, chars: 100, percent: 33.3 } }] })
     },
   })
   const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
@@ -1380,7 +1387,26 @@ function playbackFixture(t, stored) {
     return field.props
   }
   t.after(() => { reader.unmount(); settings.unmount() })
-  const view = { window, document, values, render, open, tick, position, control,
+  const view = { window, document, values, render, open, tick, position, control, writes,
+    unmount() { reader.unmount() },
+    persist() {
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay !== 1200) continue
+        timers.delete(id)
+        timer.fn()
+      }
+    },
+    async editProgress(index) {
+      const page = () => { owner = settings; return settings.render(section, props) }
+      await labeledButton(page(), '加载').props.onClick()
+      if (index === null) {
+        await labeledButton(page(), '重置进度').props.onClick()
+      } else {
+        await labeledButton(page(), '设置进度').props.onClick()
+        withClass(page(), 'dshReadLibEditorSlider').props.onChange({ target: { value: String(index) } })
+        await labeledButton(withClass(page(), 'dshReadLibEditor'), '保存').props.onClick()
+      }
+    },
     switchTo(id) { active = id; render() },
     async remount() { reader.unmount(); reader = createReact(); await open(); return view },
   }
@@ -1483,6 +1509,46 @@ test('阅读中心关闭自动暂停会立即影响已挂载的卡片，并在�
     assert.equal(reader.position(), '春风')
   }
 })
+
+test('关闭自动暂停后，首段内手动暂停仍跨卸载保留精确光标', async (t) => {
+  const view = playbackFixture(t, [['dsh-read:auto-pause', 'false']], ['春风又绿江南岸', '尾声'])
+  await view.open()
+  assert.ok(view.tick())
+  labeledButton(view.render(), '暂停').props.onClick()
+  view.switchTo('other')
+  await view.remount()
+  view.switchTo('reader')
+  view.window.dispatchEvent(new Event('focus'))
+  const paragraph = elements(view.render()).find((el) => el.props['data-paragraph'] === '0')
+  assert.equal(paragraph.children[0], '春风')
+  assert.ok(labeledButton(view.render(), '播放'))
+  assert.equal(view.tick(), false)
+})
+
+for (const index of [null, 2]) {
+  for (const unmounted of [true, false]) {
+    test(`明确${index === null ? '重置' : '设置'}进度使${unmounted ? '已卸载' : '仍挂载'}阅读器的旧光标失效`, async (t) => {
+      const view = playbackFixture(t)
+      await view.open()
+      assert.ok(view.tick() && view.tick())
+      assert.equal(view.position(), '春风')
+      view.switchTo('other')
+      if (unmounted) view.unmount()
+      await view.editProgress(index)
+      const saved = view.writes.length
+      view.persist()
+      assert.equal(view.writes.length, saved, 'stale debounce must not overwrite explicit progress')
+      if (unmounted) await view.remount()
+      else await view.open()
+      view.switchTo('reader')
+      const current = elements(view.render()).find((el) => el.props['data-paragraph'] === String(index ?? 0))
+      assert.equal(current.children[0], '', 'explicit progress starts at the new paragraph, without stale characters')
+      assert.equal(view.position(), index === null ? undefined : '春风又绿江南岸')
+      view.persist()
+      assert.equal(view.writes.at(-1).index, index ?? 0)
+    })
+  }
+}
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */
 
