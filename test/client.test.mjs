@@ -1641,6 +1641,20 @@ test('browse errors can be retried or cancelled; unavailable capability never in
   assert.match(textOf(unavailable.render()), /没有可用的目录选择器/)
 })
 
+test('browse folder rows keep their height so a long listing stays readable', () => {
+  const css = stylesheet()
+  const folders = /\.dshReadVaultFolders\{([^}]*)\}/.exec(css)
+  const folder = /\.dshReadVaultFolder\{([^}]*)\}/.exec(css)
+  assert.ok(folders, 'expected a .dshReadVaultFolders scroll-box rule')
+  assert.ok(folder, 'expected a .dshReadVaultFolder rule')
+  // The scroll box is capped; overflow:auto only preserves readability if its
+  // flex children refuse to shrink. A shrinkable row clips its name to specks.
+  assert.match(folders[1], /max-height:/)
+  assert.match(folders[1], /overflow:auto/)
+  assert.match(folders[1], /flex-direction:column/)
+  assert.match(folder[1], /flex:none/, 'folder buttons must not collapse in the flex column')
+})
+
 test('archive settings ignore results after unmount', async () => {
   const pending = deferred()
   const view = vaultSettings(() => pending.promise)
