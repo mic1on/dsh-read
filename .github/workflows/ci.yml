@@ -26,3 +26,26 @@ jobs:
       # The runtime supplies peer dependencies; do not install the whole Harness.
       - run: npm install --ignore-scripts --legacy-peer-deps --no-package-lock
       - run: npm test
+
+  release:
+    name: Publish GitHub Release
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: github-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const { readFile } = await import('node:fs/promises')
+            const { pathToFileURL } = await import('node:url')
+            const { publishRelease } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/scripts/release.mjs`).href)
+            const { version } = JSON.parse(await readFile('package.json', 'utf8'))
+            await publishRelease({ github, context, core, version })
