@@ -300,6 +300,48 @@ are written under `$DSH_HOME/dsh-read/`. An explicitly configured Markdown archi
 generated notes and per-book ownership metadata. Only matching plugin-generated identities can
 be updated/deleted; symlinks and hardlinks are refused.
 
+## Search within the current book
+
+Open a book with `/read`, then choose **书内搜索** in its reader card. Search covers the
+whole parsed book, including paragraphs the card has not loaded. It works with every
+supported text/container format (including unpacked EPUB); illustrations are skipped.
+
+- Matching is a literal substring, case-insensitive for English, within a single paragraph.
+  Leading/trailing query whitespace is trimmed; internal whitespace is preserved. No regular
+  expressions, cross-paragraph, semantic, or cross-book search. Queries allow up to 100 Unicode
+  characters. Non-overlapping occurrences have individual results.
+- Each page shows up to 20 matches, with bounded context, highlighted text, paragraph number,
+  and an available chapter heading. **上一页 / 下一页** replaces the page rather than growing
+  an unbounded list; there is no expensive exact total count. A query waits 250 ms after typing;
+  changing it cancels the older request, and late responses are discarded.
+- Opening search pauses playback and captures the original paragraph, revealed characters,
+  loaded window, and scroll position. Typing, paging, and clicking results only preview;
+  they never save reading progress. Clicking a result loads and highlights its original passage.
+- **返回原位置** (or Escape in the search field) restores that position and remains paused.
+  **从此处继续阅读** closes search and resumes from the preview; normal 1.2-second debounced
+  progress saving then applies. Previewing or closing search never creates an unread book's
+  progress record. Changing/resetting progress in Settings invalidates the search snapshot.
+- Empty queries, no matches, parse failures, and target-loading errors have explicit feedback.
+  Failed searches and previews can be retried. Changing the card's session or unmounting discards
+  the temporary preview and preserves the original cursor for existing in-window restoration.
+
+Search calls only the local reader HTTP API; it never invokes an AI tool/model or adds book text
+to the conversation. Queries and excerpts render as React text nodes with `mark` highlights.
+`book_search` still finds books by filename only.
+
+The host endpoint is `GET /dsh-read/api/search?path=…&query=…&cursor=…&limit=…`.
+`path` uses the existing book-format allowlist, `cursor` is an opaque token tied to the parsed
+book identity/query, and `limit` defaults to 20 and is capped at 50. The reply contains `query`,
+`results`, and nullable `nextCursor`; match ranges and snippet highlights use UTF-16 offsets.
+The endpoint does not read or write progress and returns only bounded snippets, never full text.
+Long scans yield between chunks and honor request cancellation.
+
+Reproduce the generated 10.6 MiB / 50,050-paragraph benchmark with
+`node scripts/benchmark-search.mjs`; pass an output path to save its JSON report. The script
+checks 20 samples per cached scenario against the agreed 500 ms P95 threshold. See the
+[measured performance and browser validation](docs/search-performance.md) for environment,
+input/render timing definitions, results, and practical limits.
+
 ## Development
 
 Install the standalone test dependency without the Harness peer packages, as CI does:
