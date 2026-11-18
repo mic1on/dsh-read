@@ -36,6 +36,11 @@ own package declared.
 - **Space toggles playback.** Click the card once to focus it, then space plays and pauses.
 It is bound to the card rather than the window on purpose: the composer lives in the same
 document, so a global listener would turn every space you type into a pause.
+- **Auto-pause when you leave reading** (on by default in 阅读中心 → 离开阅读时自动暂停). Switching
+tabs, minimising, focusing another app, or switching to a different DSH conversation stops the
+typewriter exactly where it is — including mid-word. Returning automatically resumes from
+that character, but a manually paused reader stays paused. Clicking the composer in the same
+conversation is not "leaving"; turning the switch off disables the behaviour.
 - **伴读：划词提问，留痕。** Select a passage and the reader offers 问 AI or 记一笔. 问 AI writes
 the question — book, paragraph and quote — into the composer, so you can add your own
 framing and send it yourself; 记一笔 records it without involving a session at all. Notes
@@ -98,6 +103,8 @@ conversation header stays down to the two views that belong to a session.
   primary library root and is remembered from then on.
 - Subdirectories are listed first, so you can walk down to where your books live.
 - Every book shows its format, size and progress (`已读 5.9% · 第 124 / 2083 段`, or 未开始).
+- Filter the current directory with **全部 / 在读 / 未读** (all / reading / unread). Any saved progress counts as reading, including 0% and completed books; no record means unread. Subdirectories remain visible.
+- Sort by **reading progress / last-read time**, ascending or descending; newest first is the default, with book-name tie-breaking. Last-read time uses the last progress save, including manual position changes. Unread books and missing timestamps stay last for time sorting; unread progress is 0%. Choices last until the settings page is unmounted.
 - **开始阅读 / 继续阅读** runs the same `/read` command in the session the shell currently has
   selected, then closes settings so you land on the card, resuming from the saved paragraph.
 - **设置进度** opens a slider under the book so you can move its position anywhere — for a book
@@ -202,9 +209,10 @@ settled result text into the book metadata the card renders. The typewriter timi
 the card: one `setTimeout` per step, keyed on the current values, so changing speed or pausing
 takes effect on the very next tick.
 
-The book icon uses `settings.section.icon` with the matching section ID, so the shell replaces
-its fallback gear without a DOM observer or extra CSS icon. Successful library loads do not add
-a redundant count/status row; load failures still show an error.
+The bundle registers a `currentColor` book through `settings.section.icon`, matching the section ID.
+The shell replaces its fallback gear; no navigation DOM observer or extra CSS pseudo-icon is used.
+Book counts appear only in the filter toolbar. Successful loading adds no duplicate status row;
+failed loading still shows an actionable error.
 
 The 阅读 page deliberately owns no reading state. Pressing 开始阅读 posts to `/start` — with the
 session the shell has selected, from the `useSessions` standard prop — and the host runs the real
