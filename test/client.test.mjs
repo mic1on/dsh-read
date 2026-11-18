@@ -646,32 +646,28 @@ test('asking without a session input facade must not throw', () => {
   assert.doesNotThrow(() => labeledButton(tree, '问 AI').props.onClick())
 })
 
-test('space toggles playback, and is advertised on the card', () => {
-  const react = createReact()
-  const { registered } = mount(react.React)
-  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
-  const props = { node: { data: { book: CARD_BOOK, error: '' } } }
-
-  let tree = react.render(card, props)
+test('space toggles playback, and is advertised on the card', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  let tree = view.render()
   // The card must be reachable by keyboard, or the shortcut could never fire.
   assert.equal(tree.props.tabIndex, 0)
   assert.equal(typeof tree.props.onKeyDown, 'function')
   assert.match(textOf(tree), /空格 暂停\/继续/, 'the shortcut has to be discoverable')
 
-  // The card starts paused until its first window lands, so the first press starts playback.
   const labelNow = () => (labeledButton(tree, '暂停') !== undefined ? '暂停' : '播放')
   const before = labelNow()
 
   let event = keyEvent(' ')
   tree.props.onKeyDown(event)
-  tree = react.render(card, props)
+  tree = view.render()
   assert.equal(event.defaultPrevented, true, 'space must not scroll the transcript')
   assert.notEqual(labelNow(), before, 'space should have toggled playback')
 
   // And pressing again returns to where it was.
   event = keyEvent(' ')
   tree.props.onKeyDown(event)
-  tree = react.render(card, props)
+  tree = view.render()
   assert.equal(labelNow(), before, 'space should toggle back')
 })
 
@@ -1667,6 +1663,38 @@ for (const retry of ['播放', '下一段', 'focus']) {
       }
     })
   }
+}
+
+for (const retry of ['播放', '下一段', 'focus']) {
+  test(`首次正文加载失败后通过 ${retry} 重试版本零并继续逐字播放`, async (t) => {
+    const view = playbackFixture(t)
+    view.failParagraphs(2)
+    await view.open()
+    const loads = () => view.reads.filter((url) => url.includes('/paragraphs?')).length
+    assert.equal(loads(), 1)
+    assert.match(textOf(view.render()), /正文暂时不可用/)
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (retry === 'focus') view.window.dispatchEvent(new Event('focus'))
+      else await labeledButton(view.render(), retry).props.onClick()
+      await view.open()
+      assert.equal(loads(), attempt + 1)
+      view.persist()
+      assert.equal(view.savedProgress(), undefined)
+      if (attempt === 1) {
+        assert.match(textOf(view.render()), /正文暂时不可用/)
+        assert.equal(view.tick(), false)
+      }
+    }
+    assert.doesNotMatch(textOf(view.render()), /正文暂时不可用/)
+    assert.ok(view.tick() && view.tick())
+    assert.equal(view.position(), '春风')
+    view.persist()
+    assert.equal(view.savedProgress().index, 1)
+    labeledButton(view.render(), '暂停').props.onClick()
+    view.window.dispatchEvent(new Event('focus'))
+    assert.equal(view.tick(), false)
+    assert.equal(loads(), 3)
+  })
 }
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */
