@@ -31,6 +31,7 @@ function loadBundle(fetchImpl, globals) {
     console,
   }
   Object.assign(sandbox, globals || {})
+  if (globals?.window) sandbox.window.__ModuleLoader__ = { load: (entry) => registrations.push(entry) }
   runInNewContext(SOURCE, sandbox, { filename: 'lib/client.js' })
   return registrations
 }
@@ -268,7 +269,7 @@ function createReact() {
       const at = effectCursor++
       const previous = effects[at]
       if (!previous || !deps || deps.some((value, index) => value !== previous.deps?.[index])) {
-        effects[at] = { callback, deps, cleanup: previous?.cleanup }
+        effects[at] = { callback, deps, cleanup: previous?.cleanup, pending: true }
       }
     },
   }
@@ -279,8 +280,12 @@ function createReact() {
     // 6 busy. `setters` is populated by the first render.
     setters,
     runEffect(index) {
+      effects[index].pending = false
       effects[index].cleanup?.()
       effects[index].cleanup = effects[index].callback()
+    },
+    commit() {
+      effects.forEach((effect, i) => { if (effect.pending) this.runEffect(i) })
     },
     unmount() {
       for (const effect of effects) effect.cleanup?.()
@@ -641,32 +646,28 @@ test('asking without a session input facade must not throw', () => {
   assert.doesNotThrow(() => labeledButton(tree, '问 AI').props.onClick())
 })
 
-test('space toggles playback, and is advertised on the card', () => {
-  const react = createReact()
-  const { registered } = mount(react.React)
-  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
-  const props = { node: { data: { book: CARD_BOOK, error: '' } } }
-
-  let tree = react.render(card, props)
+test('space toggles playback, and is advertised on the card', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  let tree = view.render()
   // The card must be reachable by keyboard, or the shortcut could never fire.
   assert.equal(tree.props.tabIndex, 0)
   assert.equal(typeof tree.props.onKeyDown, 'function')
   assert.match(textOf(tree), /空格 暂停\/继续/, 'the shortcut has to be discoverable')
 
-  // The card starts paused until its first window lands, so the first press starts playback.
   const labelNow = () => (labeledButton(tree, '暂停') !== undefined ? '暂停' : '播放')
   const before = labelNow()
 
   let event = keyEvent(' ')
   tree.props.onKeyDown(event)
-  tree = react.render(card, props)
+  tree = view.render()
   assert.equal(event.defaultPrevented, true, 'space must not scroll the transcript')
   assert.notEqual(labelNow(), before, 'space should have toggled playback')
 
   // And pressing again returns to where it was.
   event = keyEvent(' ')
   tree.props.onKeyDown(event)
-  tree = react.render(card, props)
+  tree = view.render()
   assert.equal(labelNow(), before, 'space should toggle back')
 })
 
@@ -1132,6 +1133,141 @@ for (const [label, byId] of [
   })
 }
 
+/* ── library filtering and sorting ──────────────────────────────────────── */
+
+test('阅读中心通过官方图标插槽提供唯一书本，不再注入 CSS 图标或观察宿主 DOM', () => {
+  const react = createReact()
+  const { registered } = mount(react.React)
+  const icons = registered.filter((entry) => entry.options.name === 'settings.section.icon')
+  assert.equal(icons.length, 1)
+  assert.equal(icons[0].options.id, 'dsh-read')
+  const icon = react.render(icons[0].component, { size: 22, active: true })
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props.width, 22)
+  assert.equal(icon.props.height, 22)
+  assert.equal(icon.props.stroke, 'currentColor')
+  assert.equal(icon.props['aria-hidden'], true)
+  assert.equal(elements(icon).filter((node) => node.type === 'svg').length, 1)
+  assert.doesNotMatch(SOURCE, /data-dsh-read-settings-nav|MutationObserver|registerSettingsNavIcon/)
+})
+
+function libraryFixture() {
+  const book = (name, percent, at) => ({
+    path: `/books/${name}.epub`, name: `${name}.epub`, extension: 'epub', size: 1024,
+    progress: percent === null ? null : { index: percent, paragraphCount: 100, chars: 1000, percent, at },
+  })
+  return [book('D', null), book('B', 50, 200), book('A', 50, 200),
+    book('C', 0, 300), book('E', 100, 100), book('F', 25, undefined)]
+}
+
+function bookNames(tree) {
+  return elements(tree).filter((el) => el.props.className === 'dshReadLibBook')
+    .map((el) => withClass(el, 'dshReadLibName').children[0])
+}
+
+function changeLibrarySelect(tree, label, value) {
+  const select = elements(tree).find((el) => el.type === 'select' && el.props['aria-label'] === label)
+  assert.ok(select, `missing select: ${label}`)
+  select.props.onChange({ target: { value } })
+}
+
+function seededLibrary(books = libraryFixture()) {
+  const page = settingsPage()
+  page.react.render(page.section, page.props)
+  page.react.setters[4](books)
+  return { ...page, render: () => page.react.render(page.section, page.props) }
+}
+
+test('书库默认最近阅读优先，同时间按书名，未读及缺失时间始终排末尾', () => {
+  const books = libraryFixture()
+  const original = JSON.stringify(books)
+  const { render } = seededLibrary(books)
+  let tree = render()
+  assert.deepEqual(bookNames(tree), ['C.epub', 'A.epub', 'B.epub', 'E.epub', 'D.epub', 'F.epub'])
+  changeLibrarySelect(tree, '书籍排序方向', 'asc')
+  tree = render()
+  assert.deepEqual(bookNames(tree), ['E.epub', 'A.epub', 'B.epub', 'C.epub', 'D.epub', 'F.epub'])
+  assert.equal(JSON.stringify(books), original, 'sorting must not mutate the host listing')
+  assert.match(textOf(tree), /显示 6 \/ 6 本/)
+})
+
+test('书库按进度升降序，未读按零进度，同值始终按书名', () => {
+  const { render } = seededLibrary()
+  changeLibrarySelect(render(), '书籍排序字段', 'progress')
+  assert.deepEqual(bookNames(render()), ['E.epub', 'A.epub', 'B.epub', 'F.epub', 'C.epub', 'D.epub'])
+  changeLibrarySelect(render(), '书籍排序方向', 'asc')
+  assert.deepEqual(bookNames(render()), ['C.epub', 'D.epub', 'F.epub', 'A.epub', 'B.epub', 'E.epub'])
+})
+
+test('在读按记录筛选（包含0%和100%），可叠加排序且保留目录', () => {
+  const { react, render } = seededLibrary()
+  react.setters[3]([{ path: '/books/子目录', name: '子目录' }])
+  let tree = render()
+  labeledButton(tree, '在读').props.onClick()
+  tree = render()
+  assert.equal(labeledButton(tree, '在读').props['aria-pressed'], true)
+  assert.deepEqual(bookNames(tree), ['C.epub', 'A.epub', 'B.epub', 'E.epub', 'F.epub'])
+  assert.ok(withClass(tree, 'dshReadLibRow'))
+  changeLibrarySelect(tree, '书籍排序字段', 'progress')
+  assert.deepEqual(bookNames(render()), ['E.epub', 'A.epub', 'B.epub', 'F.epub', 'C.epub'])
+  labeledButton(render(), '未读').props.onClick()
+  assert.deepEqual(bookNames(render()), ['D.epub'])
+  assert.match(textOf(render()), /显示 1 \/ 6 本/)
+  labeledButton(render(), '全部').props.onClick()
+  assert.equal(bookNames(render()).length, 6)
+})
+
+test('筛选空结果保留目录并能恢复全部，切换筛选收起进度编辑器', async () => {
+  const { react, render } = seededLibrary(libraryFixture().filter((book) => book.progress))
+  react.setters[3]([{ path: '/books/child', name: 'child' }])
+  await labeledButton(render(), '设置进度').props.onClick()
+  assert.ok(withClass(render(), 'dshReadLibEditor'))
+  labeledButton(render(), '未读').props.onClick()
+  assert.equal(withClass(render(), 'dshReadLibEditor'), undefined)
+  assert.ok(withClass(render(), 'dshReadLibRow'))
+  assert.match(textOf(render()), /没有符合筛选条件的书籍/)
+  labeledButton(render(), '查看全部').props.onClick()
+  assert.equal(bookNames(render()).length, 5)
+  assert.equal(withClass(render(), 'dshReadLibEditor'), undefined)
+})
+
+test('目录没有书籍时，即使有子目录也显示空书库提示', () => {
+  const { react, render } = seededLibrary([])
+  react.setters[3]([{ path: '/books/child', name: 'child' }])
+  assert.ok(withClass(render(), 'dshReadLibRow'))
+  assert.match(textOf(render()), /这个目录里没有书籍/)
+  assert.equal(labeledButton(render(), '查看全部'), undefined)
+})
+
+test('无效时间安全放末尾，同名书籍用路径稳定排序', () => {
+  const books = libraryFixture().slice(1, 3)
+  books[0].progress.at = NaN
+  books[1].progress.at = -1
+  books[0].name = books[1].name = '同名.epub'
+  const { render } = seededLibrary(books)
+  const paths = () => elements(render()).filter((el) => el.props.className === 'dshReadLibBook')
+    .map((el) => withClass(el, 'dshReadLibName').props.title)
+  assert.deepEqual(paths(), ['/books/A.epub', '/books/B.epub'])
+  changeLibrarySelect(render(), '书籍排序方向', 'asc')
+  assert.deepEqual(paths(), ['/books/A.epub', '/books/B.epub'])
+})
+
+test('重置进度刷新后，当前在读筛选立即移除该书，切回未读能看到', async () => {
+  const books = libraryFixture().slice(1, 2)
+  const { react, section, props } = settingsPage({ fetch: async (url, options) => {
+    if (url === '/dsh-read/api/progress' && options) books[0] = { ...books[0], progress: null }
+    return { status: 200, json: async () => ({ ok: true, dir: '/books', parent: '/', directories: [], books }) }
+  } })
+  const render = () => react.render(section, props)
+  await labeledButton(render(), '加载').props.onClick()
+  labeledButton(render(), '在读').props.onClick()
+  await labeledButton(render(), '重置进度').props.onClick()
+  assert.deepEqual(bookNames(render()), [])
+  assert.match(textOf(render()), /没有符合筛选条件/)
+  labeledButton(render(), '未读').props.onClick()
+  assert.deepEqual(bookNames(render()), ['B.epub'])
+})
+
 /* ── the Settings navigation icon ────────────────────────────────────────── */
 
 test('阅读中心通过官方图标插槽提供唯一书本，不再注入 CSS 图标或观察宿主 DOM', () => {
@@ -1150,25 +1286,416 @@ test('阅读中心通过官方图标插槽提供唯一书本，不再注入 CSS 
   assert.doesNotMatch(SOURCE, /data-dsh-read-settings-nav|MutationObserver|registerSettingsNavIcon/)
 })
 
-test('library loads without a redundant count row and retains failure feedback', async () => {
-  let fail = false
+test('加载书库只保留筛选栏的数量，不显示重复成功提示，空目录仍显示空态', async () => {
+  let books = libraryFixture()
+  const { react, section, props } = settingsPage({ fetch: async () => response({
+    ok: true, dir: '/books', parent: '/', directories: [], books,
+  }) })
+  const render = () => react.render(section, props)
+  await labeledButton(render(), '加载').props.onClick()
+  assert.match(textOf(render()), /显示 6 \/ 6 本/)
+  assert.doesNotMatch(textOf(render()), /共 \d+ 本书/)
+  assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
+  books = []
+  await labeledButton(render(), '加载').props.onClick()
+  assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
+  assert.match(textOf(render()), /这个目录里没有书籍/)
+})
+
+test('移除数量提示后，书库加载失败仍显示错误并在下次成功时清除', async () => {
+  let fails = true
   const { react, section, props } = settingsPage({ fetch: async () => {
-    if (fail) throw new Error('目录无权访问')
-    return response({ ok: true, dir: '/books', parent: '/', directories: [], books: [
-      { path: '/books/活着.epub', name: '活着.epub', extension: 'epub', size: 1024, progress: null },
-    ] })
+    if (fails) throw new Error('目录无权访问')
+    return response({ ok: true, dir: '/books', parent: '/', directories: [], books: libraryFixture() })
   } })
   const render = () => react.render(section, props)
   await labeledButton(render(), '加载').props.onClick()
-  assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
-  assert.doesNotMatch(textOf(render()), /共 \d+ 本书/)
-  fail = true
-  await labeledButton(render(), '加载').props.onClick()
   assert.match(textOf(withClass(render(), 'dshReadLibStatus')), /目录无权访问/)
-  fail = false
+  assert.equal(withClass(render(), 'dshReadLibStatus').props['data-error'], 'true')
+  fails = false
   await labeledButton(render(), '加载').props.onClick()
   assert.equal(withClass(render(), 'dshReadLibStatus'), undefined)
 })
+
+/* ── background playback and exact cursor restoration ──────────────────── */
+
+function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸', '尾声']) {
+  const window = new EventTarget()
+  const document = Object.assign(new EventTarget(), {
+    hidden: false, visibilityState: 'visible', hasFocus: () => true,
+    createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} },
+  })
+  const values = new Map(stored)
+  const localStorage = { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, String(v)) }
+  window.localStorage = localStorage
+  window.document = document
+  const timers = new Map()
+  let seq = 0
+  let owner
+  // A remount needs fresh hook state, but the *same* loaded plugin and window.
+  const react = Object.fromEntries(Object.keys(createReact().React).map((name) =>
+    [name, (...args) => owner.React[name](...args)]))
+  const book = { ...CARD_BOOK, paragraphCount: paragraphs.length }
+  let progress = {}
+  const writes = []
+  const reads = []
+  let paragraphFailures = 0
+  const { registered } = mount(react, {
+    globals: { window, document, localStorage,
+      setTimeout: (fn, delay) => { timers.set(++seq, { fn, delay }); return seq },
+      clearTimeout: (id) => timers.delete(id) },
+    fetch: async (url, options) => {
+      if (!options) reads.push(url)
+      if (url.includes('/paragraphs?')) {
+        if (paragraphFailures > 0) {
+          paragraphFailures -= 1
+          throw new Error('正文暂时不可用')
+        }
+        return response({ ok: true, from: 0,
+          items: paragraphs.map((text, i) => ({ text, offset: i })) })
+      }
+      if (url === '/dsh-read/api/progress' && options) {
+        const body = JSON.parse(options.body)
+        writes.push(body)
+        progress = body.clear ? {} : { [body.path]: body }
+      }
+      return response({ ok: true, progress, notes: [], dir: '/books', directories: [],
+        books: [{ ...book, extension: 'epub', progress: { index: 1, paragraphCount: paragraphs.length, chars: 100, percent: 33.3 } }] })
+    },
+  })
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  const section = registered.find((entry) => entry.options.name === 'settings.section').component
+  let active = 'reader'
+  const props = { sessionId: 'reader', node: { id: 'command-1', data: { book } },
+    useSessions: (select) => select({ byId: { [active]: { id: active, retainedBy: { mainView: 1 } } }, ids: [active] }) }
+  let reader = createReact()
+  const settings = createReact()
+  const render = () => {
+    owner = reader
+    reader.render(card, props)
+    reader.commit()
+    return reader.render(card, props)
+  }
+  const open = async () => { render(); await flush(); return render() }
+  const tick = () => {
+    render()
+    const next = [...timers].find(([, { delay }]) => delay === 100)
+    if (!next) return false
+    timers.delete(next[0]); next[1].fn(); render()
+    return true
+  }
+  const position = () => elements(render()).find((el) => el.props['data-paragraph'] === '1')?.children[0]
+  const control = () => {
+    owner = settings
+    const field = elements(settings.render(section, props)).find((el) => el.props.role === 'switch')
+    assert.ok(field && field.type === 'input' && field.props.type === 'checkbox', 'expected native auto-pause switch')
+    return field.props
+  }
+  t.after(() => { reader.unmount(); settings.unmount() })
+  const view = { window, document, values, render, open, tick, position, control, writes, reads,
+    savedProgress: () => progress[book.path],
+    failParagraphs(count) { paragraphFailures = count },
+    unmount() { reader.unmount() },
+    persist() {
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay !== 1200) continue
+        timers.delete(id)
+        timer.fn()
+      }
+    },
+    async editProgress(index) {
+      const page = () => { owner = settings; return settings.render(section, props) }
+      await labeledButton(page(), '加载').props.onClick()
+      if (index === null) {
+        await labeledButton(page(), '重置进度').props.onClick()
+      } else {
+        await labeledButton(page(), '设置进度').props.onClick()
+        withClass(page(), 'dshReadLibEditorSlider').props.onChange({ target: { value: String(index) } })
+        await labeledButton(withClass(page(), 'dshReadLibEditor'), '保存').props.onClick()
+      }
+    },
+    switchTo(id) { active = id; render() },
+    async remount() { reader.unmount(); reader = createReact(); await open(); return view },
+  }
+  return view
+}
+
+for (const away of ['blur', 'visibilitychange', 'session']) {
+  test(`自动暂停：${away} 停住逐字播放，回来后自动从同一字继续`, async (t) => {
+    const view = playbackFixture(t)
+    await view.open()
+    assert.ok(view.tick() && view.tick())
+    assert.equal(view.position(), '春风')
+    if (away === 'blur') view.window.dispatchEvent(new Event('blur'))
+    if (away === 'visibilitychange') {
+      view.document.dispatchEvent(new Event('visibilitychange'))
+      assert.ok(labeledButton(view.render(), '暂停'), 'visible events must not pause')
+      Object.assign(view.document, { hidden: true, visibilityState: 'hidden' })
+      view.document.dispatchEvent(new Event('visibilitychange'))
+    }
+    if (away === 'session') view.switchTo('other')
+    assert.ok(labeledButton(view.render(), '播放'))
+    assert.equal(view.tick(), false, 'no typewriter timer should survive the pause')
+    Object.assign(view.document, { hidden: false, visibilityState: 'visible' })
+    view.document.dispatchEvent(new Event('visibilitychange'))
+    view.window.dispatchEvent(new Event('focus'))
+    view.switchTo('reader')
+    if (away === 'session') await view.remount()
+    assert.equal(view.position(), '春风', 'restore both paragraph and revealed characters')
+    assert.ok(labeledButton(view.render(), '暂停'), 'returning must resume by itself')
+    assert.equal(view.tick(), true)
+    assert.equal(view.position(), '春风又绿')
+  })
+}
+
+test('自动暂停不打扰手动暂停：回来后仍停着，播放键照常可用', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  labeledButton(view.render(), '暂停').props.onClick()
+  view.window.dispatchEvent(new Event('blur'))
+  Object.assign(view.document, { hidden: true, visibilityState: 'hidden' })
+  view.document.dispatchEvent(new Event('visibilitychange'))
+  assert.equal(view.tick(), false, 'manual pause keeps the typewriter stopped')
+  Object.assign(view.document, { hidden: false, visibilityState: 'visible' })
+  view.document.dispatchEvent(new Event('visibilitychange'))
+  view.window.dispatchEvent(new Event('focus'))
+  assert.ok(labeledButton(view.render(), '播放'), 'returning must not resume a manual pause')
+  assert.equal(view.position(), '春风')
+  labeledButton(view.render(), '播放').props.onClick()
+  assert.ok(view.tick())
+  assert.equal(view.position(), '春风又绿')
+})
+
+test('手动暂停后切离会话再切回：光标保留但不自动播放', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  labeledButton(view.render(), '暂停').props.onClick()
+  view.switchTo('other')
+  const back = await view.remount()
+  view.switchTo('reader')
+  assert.equal(back.position(), '春风', 'the checkpoint keeps the exact character')
+  assert.ok(labeledButton(view.render(), '播放'), 'a paused checkpoint stays paused')
+  labeledButton(view.render(), '播放').props.onClick()
+  assert.ok(view.tick())
+  assert.equal(view.position(), '春风又绿')
+})
+
+test('自动暂停后切离会话再切回：恢复光标并自动继续', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  view.window.dispatchEvent(new Event('blur'))
+  view.switchTo('other')
+  const back = await view.remount()
+  view.switchTo('reader')
+  assert.equal(back.position(), '春风', 'the checkpoint keeps the exact character')
+  assert.ok(labeledButton(view.render(), '暂停'), 'a resumable checkpoint continues by itself')
+  assert.ok(view.tick())
+  assert.equal(view.position(), '春风又绿')
+})
+
+test('阅读中心关闭自动暂停会立即影响已挂载的卡片，并在新窗口中保留', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.equal(view.control().checked, true)
+  view.control().onChange({ target: { checked: false } })
+  assert.equal(view.control().checked, false)
+  assert.equal(view.values.get('dsh-read:auto-pause'), 'false')
+  const reopened = playbackFixture(t, view.values)
+  await reopened.open()
+  assert.equal(reopened.control().checked, false)
+  for (const reader of [view, reopened]) {
+    reader.window.dispatchEvent(new Event('blur'))
+    Object.assign(reader.document, { hidden: true, visibilityState: 'hidden' })
+    reader.document.dispatchEvent(new Event('visibilitychange'))
+    reader.switchTo('other')
+    assert.ok(labeledButton(reader.render(), '暂停'))
+    assert.ok(reader.tick() && reader.tick())
+    assert.equal(reader.position(), '春风')
+  }
+})
+
+test('关闭自动暂停后，首段内手动暂停仍跨卸载保留精确光标', async (t) => {
+  const view = playbackFixture(t, [['dsh-read:auto-pause', 'false']], ['春风又绿江南岸', '尾声'])
+  await view.open()
+  assert.ok(view.tick())
+  labeledButton(view.render(), '暂停').props.onClick()
+  view.switchTo('other')
+  await view.remount()
+  view.switchTo('reader')
+  view.window.dispatchEvent(new Event('focus'))
+  const paragraph = elements(view.render()).find((el) => el.props['data-paragraph'] === '0')
+  assert.equal(paragraph.children[0], '春风')
+  assert.ok(labeledButton(view.render(), '播放'))
+  assert.equal(view.tick(), false)
+})
+
+for (const index of [null, 2, 3]) {
+  for (const unmounted of [true, false]) {
+    test(`明确${index === null ? '重置' : '设置'}进度使${unmounted ? '已卸载' : '仍挂载'}阅读器的旧光标失效`, async (t) => {
+      const view = playbackFixture(t)
+      await view.open()
+      assert.ok(view.tick() && view.tick())
+      assert.equal(view.position(), '春风')
+      view.switchTo('other')
+      if (unmounted) view.unmount()
+      await view.editProgress(index)
+      const saved = view.writes.length
+      view.persist()
+      assert.equal(view.writes.length, saved, 'stale debounce must not overwrite explicit progress')
+      const loads = view.reads.filter((url) => url.includes('/paragraphs?')).length
+      if (unmounted) await view.remount()
+      else {
+        await view.open()
+        assert.equal(view.reads.filter((url) => url.includes('/paragraphs?')).length, loads,
+          'invalidation must not reload a mounted background reader')
+      }
+      view.persist()
+      assert.equal(view.writes.length, saved)
+      if (index === null) assert.equal(view.savedProgress(), undefined)
+      view.switchTo('reader')
+      await view.open()
+      view.persist()
+      assert.equal(view.writes.length, saved, 'returning without a reading step must not write')
+      if (index === 3) {
+        assert.ok(labeledButton(view.render(), '重新开始'))
+        assert.equal(view.tick(), false)
+        assert.equal(view.savedProgress().index, 3)
+        return
+      }
+      const current = elements(view.render()).find((el) => el.props['data-paragraph'] === String(index ?? 0))
+      assert.equal(current.children[0], '', 'explicit progress starts at the new paragraph, without stale characters')
+      assert.equal(view.position(), index === null ? undefined : '春风又绿江南岸')
+      if (index !== null) labeledButton(view.render(), '播放').props.onClick()
+      assert.ok(view.tick())
+      view.persist()
+      assert.equal(view.writes.length, saved + 1)
+      assert.equal(view.savedProgress().index, index === null ? 1 : 3)
+    })
+  }
+}
+
+test('关闭自动暂停时重置仍保持未读，直到返回并实际阅读', async (t) => {
+  const view = playbackFixture(t, [['dsh-read:auto-pause', 'false']])
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  view.switchTo('other')
+  await view.editProgress(null)
+  await view.open()
+  assert.equal(view.tick(), false)
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  await view.remount()
+  assert.equal(view.tick(), false)
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  view.switchTo('reader')
+  await view.open()
+  view.persist()
+  assert.equal(view.savedProgress(), undefined)
+  assert.ok(view.tick())
+  view.persist()
+  assert.equal(view.savedProgress().index, 1)
+})
+
+test('前台明确设置进度后主动播放才同步位置，加载不写回', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.ok(view.tick() && view.tick())
+  const loads = view.reads.filter((url) => url.includes('/paragraphs?')).length
+  await view.editProgress(2)
+  await view.open()
+  assert.equal(view.reads.filter((url) => url.includes('/paragraphs?')).length, loads)
+  assert.equal(view.tick(), false)
+  labeledButton(view.render(), '播放').props.onClick()
+  await view.open()
+  view.persist()
+  assert.equal(view.savedProgress().index, 2)
+  assert.equal(view.writes.length, 1)
+  assert.ok(view.tick())
+  view.persist()
+  assert.equal(view.savedProgress().index, 3)
+})
+
+for (const retry of ['播放', '下一段', 'focus']) {
+  for (const index of [null, 2, 3]) {
+    test(`进度同步失败后通过 ${retry} 重试同一版本 ${index ?? '重置'}`, async (t) => {
+      const view = playbackFixture(t)
+      await view.open()
+      assert.ok(view.tick() && view.tick())
+      view.switchTo('other')
+      await view.editProgress(index)
+      view.failParagraphs(2)
+      view.switchTo('reader')
+      await view.open()
+      assert.match(textOf(view.render()), /正文暂时不可用/)
+      const saved = view.writes.length
+      const loads = () => view.reads.filter((url) => url.includes('/paragraphs?')).length
+      const before = loads()
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        if (retry === 'focus') view.window.dispatchEvent(new Event('focus'))
+        else await labeledButton(view.render(), retry).props.onClick()
+        await view.open()
+        assert.equal(loads(), before + attempt)
+        view.persist()
+        assert.equal(view.writes.length, saved, 'failed retries and loading must not write progress')
+        assert.equal(view.savedProgress()?.index, index ?? undefined)
+        if (attempt === 1) {
+          assert.match(textOf(view.render()), /正文暂时不可用/)
+          assert.equal(view.tick(), false)
+        }
+      }
+      assert.doesNotMatch(textOf(view.render()), /正文暂时不可用/)
+      if (index === 3) {
+        assert.ok(labeledButton(view.render(), '重新开始'))
+        assert.equal(view.tick(), false)
+      } else {
+        const current = elements(view.render()).find((el) => el.props['data-paragraph'] === String(index ?? 0))
+        assert.equal(current.children[0], '')
+        const play = labeledButton(view.render(), '播放')
+        if (play) play.props.onClick()
+        assert.ok(view.tick())
+        view.persist()
+        assert.equal(view.writes.length, saved + 1)
+        assert.equal(view.savedProgress().index, index === null ? 1 : 3)
+      }
+    })
+  }
+}
+
+for (const retry of ['播放', '下一段', 'focus']) {
+  test(`首次正文加载失败后通过 ${retry} 重试版本零并继续逐字播放`, async (t) => {
+    const view = playbackFixture(t)
+    view.failParagraphs(2)
+    await view.open()
+    const loads = () => view.reads.filter((url) => url.includes('/paragraphs?')).length
+    assert.equal(loads(), 1)
+    assert.match(textOf(view.render()), /正文暂时不可用/)
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (retry === 'focus') view.window.dispatchEvent(new Event('focus'))
+      else await labeledButton(view.render(), retry).props.onClick()
+      await view.open()
+      assert.equal(loads(), attempt + 1)
+      view.persist()
+      assert.equal(view.savedProgress(), undefined)
+      if (attempt === 1) {
+        assert.match(textOf(view.render()), /正文暂时不可用/)
+        assert.equal(view.tick(), false)
+      }
+    }
+    assert.doesNotMatch(textOf(view.render()), /正文暂时不可用/)
+    assert.ok(view.tick() && view.tick())
+    assert.equal(view.position(), '春风')
+    view.persist()
+    assert.equal(view.savedProgress().index, 1)
+    labeledButton(view.render(), '暂停').props.onClick()
+    view.window.dispatchEvent(new Event('focus'))
+    assert.equal(view.tick(), false)
+    assert.equal(loads(), 3)
+  })
+}
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */
 
