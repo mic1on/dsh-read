@@ -1343,14 +1343,21 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
   let progress = {}
   const writes = []
   const reads = []
+  let paragraphFailures = 0
   const { registered } = mount(react, {
     globals: { window, document, localStorage,
       setTimeout: (fn, delay) => { timers.set(++seq, { fn, delay }); return seq },
       clearTimeout: (id) => timers.delete(id) },
     fetch: async (url, options) => {
       if (!options) reads.push(url)
-      if (url.includes('/paragraphs?')) return response({ ok: true, from: 0,
-        items: paragraphs.map((text, i) => ({ text, offset: i })) })
+      if (url.includes('/paragraphs?')) {
+        if (paragraphFailures > 0) {
+          paragraphFailures -= 1
+          throw new Error('正文暂时不可用')
+        }
+        return response({ ok: true, from: 0,
+          items: paragraphs.map((text, i) => ({ text, offset: i })) })
+      }
       if (url === '/dsh-read/api/progress' && options) {
         const body = JSON.parse(options.body)
         writes.push(body)
@@ -1391,6 +1398,7 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
   t.after(() => { reader.unmount(); settings.unmount() })
   const view = { window, document, values, render, open, tick, position, control, writes, reads,
     savedProgress: () => progress[book.path],
+    failParagraphs(count) { paragraphFailures = count },
     unmount() { reader.unmount() },
     persist() {
       for (const [id, timer] of [...timers]) {
@@ -1614,6 +1622,52 @@ test('前台明确设置进度后主动播放才同步位置，加载不写回',
   view.persist()
   assert.equal(view.savedProgress().index, 3)
 })
+
+for (const retry of ['播放', '下一段', 'focus']) {
+  for (const index of [null, 2, 3]) {
+    test(`进度同步失败后通过 ${retry} 重试同一版本 ${index ?? '重置'}`, async (t) => {
+      const view = playbackFixture(t)
+      await view.open()
+      assert.ok(view.tick() && view.tick())
+      view.switchTo('other')
+      await view.editProgress(index)
+      view.failParagraphs(2)
+      view.switchTo('reader')
+      await view.open()
+      assert.match(textOf(view.render()), /正文暂时不可用/)
+      const saved = view.writes.length
+      const loads = () => view.reads.filter((url) => url.includes('/paragraphs?')).length
+      const before = loads()
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        if (retry === 'focus') view.window.dispatchEvent(new Event('focus'))
+        else await labeledButton(view.render(), retry).props.onClick()
+        await view.open()
+        assert.equal(loads(), before + attempt)
+        view.persist()
+        assert.equal(view.writes.length, saved, 'failed retries and loading must not write progress')
+        assert.equal(view.savedProgress()?.index, index ?? undefined)
+        if (attempt === 1) {
+          assert.match(textOf(view.render()), /正文暂时不可用/)
+          assert.equal(view.tick(), false)
+        }
+      }
+      assert.doesNotMatch(textOf(view.render()), /正文暂时不可用/)
+      if (index === 3) {
+        assert.ok(labeledButton(view.render(), '重新开始'))
+        assert.equal(view.tick(), false)
+      } else {
+        const current = elements(view.render()).find((el) => el.props['data-paragraph'] === String(index ?? 0))
+        assert.equal(current.children[0], '')
+        const play = labeledButton(view.render(), '播放')
+        if (play) play.props.onClick()
+        assert.ok(view.tick())
+        view.persist()
+        assert.equal(view.writes.length, saved + 1)
+        assert.equal(view.savedProgress().index, index === null ? 1 : 3)
+      }
+    })
+  }
+}
 
 /* ── Markdown archive interactions ──────────────────────────────────────── */
 
