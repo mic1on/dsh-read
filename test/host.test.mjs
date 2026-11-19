@@ -277,6 +277,7 @@ test('host plugin exports its cordis name, mounts routes late, and registers /re
     '/dsh-read/api/open',
     '/dsh-read/api/paragraphs',
     '/dsh-read/api/progress',
+    '/dsh-read/api/search',
     '/dsh-read/api/start',
     '/dsh-read/api/vault',
     '/dsh-read/api/vault/open',
@@ -795,4 +796,79 @@ test('progress round-trips through the data directory', async () => {
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('content search returns bounded pages from the whole book without changing saved progress', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-content-search-'))
+  try {
+    const path = join(directory, 'whole.txt')
+    await writeFile(path, '第一章\n\n' + Array.from({ length: 250 }, (_, i) => `正文 ${i} needle ` + '长'.repeat(300)).join('\n\n'))
+    const { routes } = mount()
+    await request(routes, '/dsh-read/api/progress', { method: 'POST', body: { path, index: 17, chars: 1000 } })
+    const before = (await request(routes, '/dsh-read/api/progress')).payload
+    let cursor
+    const hits = []
+    do {
+      const page = await request(routes, `/dsh-read/api/search?path=${encodeURIComponent(path)}&query=NEEDLE${cursor ? `&cursor=${cursor}` : ''}`)
+      assert.equal(page.status, 200)
+      assert.ok(page.payload.results.length <= 20)
+      assert.equal('paragraphs' in page.payload, false)
+      for (const hit of page.payload.results) {
+        assert.equal(hit.chapter, '第一章')
+        assert.ok(hit.snippet.length <= 126)
+      }
+      hits.push(...page.payload.results)
+      cursor = page.payload.nextCursor
+    } while (cursor)
+    assert.equal(hits.length, 250)
+    assert.equal(hits.at(-1).index, 250)
+    assert.deepEqual((await request(routes, '/dsh-read/api/progress')).payload, before)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('search HTTP validation, parser failures, and no-result responses are explicit', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-search-errors-'))
+  try {
+    const path = join(directory, 'book.txt')
+    await writeFile(path, '书的正文')
+    await writeFile(join(directory, 'broken.mobi'), 'invalid')
+    const { routes } = mount()
+    const url = `/dsh-read/api/search?path=${encodeURIComponent(path)}`
+    for (const suffix of ['', '&query=%20', `&query=${'x'.repeat(101)}`, '&query=x&cursor=invalid', '&query=x&limit=no']) {
+      const result = await request(routes, url + suffix)
+      assert.equal(result.status, 400)
+      assert.equal(result.payload.ok, false)
+      assert.ok(result.payload.error)
+    }
+    assert.equal((await request(routes, url + '&query=x', { method: 'POST' })).status, 400)
+    for (const file of ['private.bin', 'missing.txt', 'broken.mobi']) {
+      const result = await request(routes, `/dsh-read/api/search?path=${encodeURIComponent(join(directory, file))}&query=x`)
+      assert.equal(result.payload.ok, false)
+    }
+    const empty = await request(routes, url + '&query=missing')
+    assert.deepEqual(empty.payload.results, [])
+    assert.equal(empty.payload.nextCursor, null)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('search HTTP supports zipped and unpacked EPUB, and every allowed text extension', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-search-formats-'))
+  try {
+    const zipped = join(directory, 'book.epub')
+    const unpacked = join(directory, 'unpacked.epub')
+    await writeFile(zipped, fixtureEpub())
+    await writeUnpackedEpub(unpacked)
+    const { routes } = mount()
+    for (const path of [zipped, unpacked]) {
+      const result = await request(routes, `/dsh-read/api/search?path=${encodeURIComponent(path)}&query=${encodeURIComponent('第一章')}`)
+      assert.equal(result.status, 200)
+      assert.equal(result.payload.results[0].index, 0)
+    }
+    for (const extension of ['txt', 'md', 'markdown', 'text', 'log']) {
+      const path = join(directory, `book.${extension}`)
+      await writeFile(path, '\ufeff中文正文 keyword')
+      const result = await request(routes, `/dsh-read/api/search?path=${encodeURIComponent(path)}&query=KEYWORD`)
+      assert.equal(result.payload.results.length, 1)
+    }
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })
