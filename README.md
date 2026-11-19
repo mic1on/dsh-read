@@ -278,6 +278,15 @@ panel filtered to that paragraph and expands all its entries; **全部批注** r
 The panel scrolls inside the reader, including long answers. Text is displayed as plain text with
 line breaks, so saved Markdown syntax remains visible.
 
+Each entry has a visible **删除** button, even while collapsed. Choose **确认删除** or **取消**
+in the entry. Confirmation permanently removes the annotation, its saved question/answer and
+the matching Markdown file in the current archive directory, including any handwritten edits
+inside that file. Original conversation messages remain. Counts and passage marks update without
+changing your reading position. A failed delete keeps the entry and offers **重试删除**. If only
+Markdown removal fails, the internal record is removed and a separate warning offers
+**重试删除 Markdown**.
+This retry warning stays in the current card; it is not persisted across a page reload or book change.
+
 **刷新** reloads the saved records, including answers archived since you opened the panel.
 The panel does not poll or request a new AI response. Loading, an empty book/paragraph and read
 errors have separate feedback; **重试** retries a failed read. A failed refresh labels any retained

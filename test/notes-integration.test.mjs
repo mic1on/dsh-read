@@ -1,7 +1,7 @@
 // Host wiring with realistic awaited projection registration, committed session events
 // and HTTP calls; no model requests, profile mutation, or real notes are involved.
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, writeFile, readFile, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, readFile, readdir, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -161,4 +161,45 @@ test('vault and export method boundaries reject mixed operations, preserve confi
   assert.equal(data.libraryRoots[0], home)
   assert.ok((await readdir(vault)).length >= 1)
   await dispose()
+})
+
+test('UI deletion removes only the matching book annotation and Markdown, including when the book moved', async () => {
+  let host = await mount()
+  const path = join(home, 'delete-book.txt')
+  const otherPath = join(home, 'keep-book.txt')
+  await writeFile(path, '第一段\n\n待删除的摘录')
+  await writeFile(otherPath, '另一本书的摘录')
+  const vault = join(home, 'deletion-vault')
+  await host.request('/dsh-read/api/vault', { path: vault })
+  const deleted = await host.request('/dsh-read/api/notes', { path, paragraph: 1, kind: 'question', quote: '待删除的摘录', sessionId: 'test-reading-session' })
+  const kept = await host.request('/dsh-read/api/notes', { path: otherPath, kind: 'note', quote: '另一本书的摘录' })
+  const unrelated = join(vault, '手写笔记.md')
+  await writeFile(unrelated, '独立手写文件保留')
+  host.append('turn/start', { turn: 5 })
+  host.append('user/message', { id: 'delete-question', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: `「待删除的摘录」<!--dshr-${deleted.note.id}-->\n\n我的问题` }] })
+  host.append('assistant/message', { turn: 5, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '已保存的回答' }] } })
+  host.append('turn/end', { turn: 5, reason: { kind: 'completed' } })
+  await host.dispose()
+  assert.match(await readFile(deleted.mdPath, 'utf8'), /已保存的回答/)
+  host = await mount()
+  try {
+    await host.request('/dsh-read/api/progress', { path, index: 1, chars: 3 })
+    const progressBefore = await readFile(join(home, 'dsh-read', 'progress.json'), 'utf8')
+    const otherBefore = await readFile(kept.mdPath, 'utf8')
+    const wrongBook = await host.request('/dsh-read/api/notes', { path: otherPath, remove: deleted.note.id })
+    assert.equal(wrongBook.notes.length, 1)
+    assert.match(await readFile(deleted.mdPath, 'utf8'), /已保存的回答/)
+    await rename(path, `${path}.moved`)
+    const removed = await host.request('/dsh-read/api/notes', { path, remove: deleted.note.id })
+    assert.equal(removed.ok, true)
+    assert.deepEqual(removed.notes, [])
+    assert.equal(removed.mdError, undefined)
+    assert.deepEqual((await host.request(`/dsh-read/api/notes?path=${encodeURIComponent(path)}`)).notes, [])
+    await assert.rejects(readFile(deleted.mdPath), { code: 'ENOENT' })
+    assert.equal(await readFile(kept.mdPath, 'utf8'), otherBefore)
+    assert.equal(await readFile(unrelated, 'utf8'), '独立手写文件保留')
+    assert.equal(await readFile(join(home, 'dsh-read', 'progress.json'), 'utf8'), progressBefore)
+    assert.deepEqual((await host.request('/dsh-read/api/notes', { path, remove: deleted.note.id })).notes, [], 'retry is idempotent')
+  } finally { await host.dispose() }
 })
