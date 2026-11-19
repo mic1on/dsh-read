@@ -12,6 +12,7 @@ import { crc32, deflateRawSync } from 'node:zlib'
 import { loadBook, detectChapters, snapChapters, splitParagraphs } from '../lib/book.mjs'
 import { parseEpub } from '../lib/formats/epub.mjs'
 import { parseMobi } from '../lib/formats/mobi.mjs'
+import { searchBook } from '../lib/book-search.mjs'
 
 /* ── container builders ─────────────────────────────────────────────────── */
 
@@ -260,4 +261,20 @@ test('book cache refreshes same-size edits, explicit fresh reads and deleted fil
   assert.notEqual(changed.revision, original.revision)
   await rm(path)
   await assert.rejects(loadBook(path), /file not found/)
+})
+
+test('content search works on parsed EPUB, MOBI, AZW and AZW3 using original paragraph offsets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-read-search-containers-'))
+  try {
+    for (const extension of ['epub', 'mobi', 'azw', 'azw3']) {
+      const path = join(directory, `fixture.${extension}`)
+      await writeFile(path, extension === 'epub' ? epubFixture() : makeMobi(MOBI_HTML))
+      const entry = await loadBook(path)
+      const { results } = await searchBook(entry, { query: 'lighthouse' })
+      assert.ok(results.length > 0, extension)
+      for (const hit of results) {
+        assert.equal(entry.paragraphs[hit.index].text.slice(hit.start, hit.end).toLowerCase(), 'lighthouse')
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })

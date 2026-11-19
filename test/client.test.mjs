@@ -1561,7 +1561,7 @@ test('移除数量提示后，书库加载失败仍显示错误并在下次成�
 
 /* ── background playback and exact cursor restoration ──────────────────── */
 
-function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸', '尾声']) {
+function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸', '尾声'], extra = {}) {
   const window = new EventTarget()
   const document = Object.assign(new EventTarget(), {
     hidden: false, visibilityState: 'visible', hasFocus: () => true,
@@ -1588,6 +1588,7 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
       clearTimeout: (id) => timers.delete(id) },
     fetch: async (url, options) => {
       if (!options) reads.push(url)
+      if (extra.search && url.includes('/search?')) return response(await extra.search(url))
       if (url.includes('/paragraphs?')) {
         if (paragraphFailures > 0) {
           paragraphFailures -= 1
@@ -1635,6 +1636,20 @@ function playbackFixture(t, stored, paragraphs = ['甲', '春风又绿江南岸'
   }
   t.after(() => { reader.unmount(); settings.unmount() })
   const view = { window, document, values, render, open, tick, position, control, writes, reads,
+    async search(query) {
+      labeledButton(render(), '书内搜索').props.onClick()
+      render()
+      const field = elements(render()).find((node) => node.props['aria-label'] === '正文关键词')
+      field.props.onChange({ target: { value: query } })
+      render()
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay !== 250) continue
+        timers.delete(id)
+        void timer.fn()
+      }
+      await flush()
+      return render()
+    },
     savedProgress: () => progress[book.path],
     failParagraphs(count) { paragraphFailures = count },
     unmount() { reader.unmount() },
@@ -2447,6 +2462,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
   const writes = []
   let getNotes = () => ({ ok: true, notes, archiveEnabled: true })
   let getLocate = () => ({ ok: false, error: '无法可靠定位' })
+  let getSearch = () => searchPayload({ index: 6 })
   let getPage = initialPage || ((params) => {
     const from = Number(params.get('from'))
     return { ok: true, from, total: prose.length,
@@ -2464,6 +2480,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
       const params = new URL(url, 'http://test').searchParams
       if (url.includes('/notes/locate?')) return response(await getLocate(params))
       if (url.includes('/notes?')) return response(await getNotes(params))
+      if (url.includes('/search?')) return response(await getSearch(params))
       if (url.includes('/paragraphs?')) return response(await getPage(params))
       if (url.endsWith('/progress') && options) {
         writes.push(JSON.parse(options.body))
@@ -2500,6 +2517,14 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
     setNotes(fn) { getNotes = fn },
     setLocate(fn) { getLocate = fn },
     setPage(fn) { getPage = fn },
+    setSearch(fn) { getSearch = fn },
+    async search(query = 'needle') {
+      labeledButton(render(), '书内搜索').props.onClick(); render()
+      elements(render()).find((el) => el.props['aria-label'] === '正文关键词').props.onChange({ target: { value: query } })
+      render()
+      for (const [id, timer] of [...timers]) if (timer.delay === 250) { timers.delete(id); void timer.fn() }
+      return ready()
+    },
     async resetProgress() {
       const page = () => { hookOwner = settings; return settings.render(section, props) }
       const row = () => withClass(page(), 'dshReadLibBook')
@@ -2631,7 +2656,7 @@ test('批注加载有加载态、空态和重试，刷新失败保留旧数据�
 })
 
 test('切书和切会话立即隐藏旧批注，迟到的读取与定位不会混入新上下文', async (t) => {
-  for (const change of ['book', 'session']) {
+  for (const change of ['book', 'session', 'revision']) {
     await t.test(change, async (t) => {
       const view = await reviewReader(t, { notes: [reviewNote('old')] })
       view.open(); await view.ready(); view.expand('old')
@@ -2642,6 +2667,7 @@ test('切书和切会话立即隐藏旧批注，迟到的读取与定位不会�
       view.setNotes(() => listing.promise)
       const refresh = labeledButton(view.panel(), '刷新').props.onClick()
       if (change === 'book') view.props.node = { id: 'other', data: { book: { ...view.book, path: '/books/other.txt' } } }
+      else if (change === 'revision') view.props.node.data.book = { ...view.book, revision: 'reopened-version' }
       else view.props.sessionId = 'another-session'
       assert.equal(withClass(view.render(), 'dshReadNotes'), undefined)
       view.open()
@@ -2807,3 +2833,406 @@ test('初次正文加载期间打开再返回批注，不会被迟到的加载�
   assert.equal(view.tick(), false)
   assert.equal(view.writes.length, 0)
 })
+
+test('搜索预览与批注互斥，退出预览后定位只提交批注位置，再搜索返回仍保留该位置', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('target', 1), reviewNote('preview-mark', 6)] })
+  view.react.setters[1](1); view.react.setters[2](4); view.render()
+  const staleOpen = labeledButton(view.render(), '批注').props.onClick
+  await view.search()
+  await withClass(view.render(), 'dshReadSearchHit').props.onClick(); view.render()
+  assert.equal(labeledButton(view.render(), '批注').props.disabled, true)
+  const mark = withClass(view.render(), 'dshReadNoteMark')
+  assert.equal(mark.props.disabled, true, 'body markers obey the same mode rule')
+  staleOpen(); mark.props.onClick()
+  assert.equal(view.panel(), undefined, 'stale event callbacks cannot enter notes during a preview')
+  view.persist()
+  assert.equal(view.writes.length, 0)
+  labeledButton(view.render(), '返回原位置').props.onClick(); view.render()
+  assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+  assert.equal(elements(view.render()).find((el) => el.props['data-paragraph'] === '1').children[0], view.prose[1].slice(0, 4))
+  view.open(); await view.ready(); view.expand('target')
+  view.setLocate(() => locationPayload(view, 6, { book: { ...view.book, revision: 'new-content', chars: 9999 } }))
+  await view.locate('target'); view.render(); view.persist()
+  assert.equal(view.writes.at(-1).index, 6)
+  assert.equal(view.writes.at(-1).chars, 9999)
+  await view.search(); labeledButton(view.render(), '返回原位置').props.onClick(); view.render()
+  assert.equal(new URL(view.calls.filter((call) => call.url.includes('/search?')).at(-1).url, 'http://test').searchParams.get('revision'), 'new-content')
+  assert.ok(elements(view.render()).some((el) => el.props['data-active'] === 'true' && el.props['data-paragraph'] === '6'))
+  const writes = view.writes.length
+  view.persist(); assert.equal(view.writes.length, writes)
+})
+
+test('搜索不能抢占待完成批注定位；新模式及后续定位忽略迟到预览', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('target', 1)] })
+  const staleSearch = labeledButton(view.render(), '书内搜索').props.onClick
+  const location = deferred()
+  view.open(); await view.ready(); view.expand('target'); view.setLocate(() => location.promise)
+  const locating = view.locate('target'); view.render()
+  staleSearch(); view.render()
+  assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+  assert.ok(view.panel())
+  labeledButton(view.panel(), '返回阅读').props.onClick(); view.render()
+  const preview = deferred()
+  view.setPage(() => preview.promise)
+  await view.search()
+  const pending = withClass(view.render(), 'dshReadSearchHit').props.onClick(); view.render()
+  labeledButton(view.render(), '返回原位置').props.onClick(); view.render()
+  view.open(); await view.ready(); view.expand('target')
+  view.setLocate(() => locationPayload(view, 7))
+  await view.locate('target'); view.render()
+  location.resolve(locationPayload(view, 2)); await locating
+  preview.resolve(locationPayload(view, 6)); await pending
+  view.render(); view.persist()
+  assert.equal(view.writes.at(-1).index, 7)
+  assert.equal(view.writes.length, 1)
+})
+
+test('批注定位后搜索预览必须校验最新内容版本，版本错误不跳转或写入进度', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('target', 1)] })
+  view.open(); await view.ready(); view.expand('target')
+  view.setLocate(() => locationPayload(view, 3))
+  await view.locate('target'); view.render(); view.persist()
+  view.setSearch(() => ({ ...searchPayload({ index: 6 }), revision: 'verified-revision' }))
+  await view.search()
+  view.setPage(() => ({ ok: false, error: '书籍内容已变化，请重新打开书籍后继续阅读。' }))
+  await withClass(view.render(), 'dshReadSearchHit').props.onClick(); view.render()
+  const page = view.calls.filter((call) => call.url.includes('/paragraphs?')).at(-1)
+  assert.equal(new URL(page.url, 'http://test').searchParams.get('revision'), 'verified-revision')
+  assert.match(textOf(view.render()), /书籍内容已变化/)
+  assert.equal(labeledButton(view.render(), '从此处继续阅读').props.disabled, true)
+  labeledButton(view.render(), '返回原位置').props.onClick(); view.render(); view.persist()
+  assert.ok(elements(view.render()).some((el) => el.props['data-active'] === 'true' && el.props['data-paragraph'] === '3'))
+  assert.equal(view.writes.length, 1)
+  assert.equal(view.writes[0].index, 3)
+})
+
+test('重新打开同路径的新版本使旧搜索快照及迟到预览失效，并加载新窗口', async (t) => {
+  const view = await reviewReader(t)
+  await view.search()
+  const preview = deferred()
+  view.setPage(() => preview.promise)
+  const pending = withClass(view.render(), 'dshReadSearchHit').props.onClick(); view.render()
+  const updated = view.prose.map((text) => `新版 ${text}`)
+  view.setPage((params) => {
+    const from = Number(params.get('from'))
+    return { ok: true, from, items: updated.slice(from).map((text, i) => ({ text, offset: (from + i) * 20 })) }
+  })
+  view.props.node.data.book = { ...view.book, revision: 'reopened-version' }
+  view.render(); await view.ready()
+  preview.resolve(locationPayload(view, 6)); await pending; view.render(); view.persist()
+  assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+  assert.ok(elements(view.render()).some((el) => el.props['data-paragraph'] === '0'))
+  assert.equal(new URL(view.calls.filter((call) => call.url.includes('/paragraphs?')).at(-1).url, 'http://test').searchParams.get('revision'), 'reopened-version')
+  assert.equal(view.writes.length, 0)
+})
+/* ── whole-book content search ─────────────────────────────────────────── */
+
+function contentSearchFixture(t, { search, preview } = {}) {
+  const react = createReact()
+  const timers = new Map()
+  const calls = []
+  const writes = []
+  let sequence = 0
+  let saved = { [CARD_BOOK.path]: { index: 4 } }
+  const paragraphs = Array.from({ length: 160 }, (_, i) => ({ text: `段落 ${i} needle 原文`, offset: i * 30 }))
+  const book = { ...CARD_BOOK, chars: 4800, paragraphCount: paragraphs.length }
+  const scroll = Object.assign(new EventTarget(), { scrollTop: 123, scrollHeight: 1000, clientHeight: 300,
+    querySelector: () => ({ scrollIntoView: () => { scroll.scrollTop = 777 } }) })
+  const { registered } = mount(react.React, {
+    globals: {
+      setTimeout: (fn, delay) => { timers.set(++sequence, { fn, delay }); return sequence },
+      clearTimeout: (id) => timers.delete(id),
+    },
+    fetch: async (url, options) => {
+      calls.push({ url, options })
+      const params = new URL(url, 'http://localhost').searchParams
+      if (url.includes('/search?')) return response(await (search ? search(params, options) : searchPayload()))
+      if (url.includes('/paragraphs?')) {
+        const from = Number(params.get('from'))
+        const count = Number(params.get('count'))
+        if (preview && from >= 50) {
+          const result = await preview(params, options)
+          if (result) return response(result)
+        }
+        return response({ ok: true, from, items: paragraphs.slice(from, from + count) })
+      }
+      if (url.endsWith('/progress') && options?.method === 'POST') {
+        const body = JSON.parse(options.body)
+        writes.push(body)
+        saved = { [body.path]: body }
+      }
+      return response({ ok: true, progress: saved, notes: [] })
+    },
+  })
+  const card = registered.find((item) => item.options.name === 'conversation.chat.node').component
+  const props = { sessionId: 'reader', node: { id: 'content-search', data: { book } } }
+  const render = () => {
+    let tree = react.render(card, props)
+    withClass(tree, 'dshReadStream').props.ref(scroll)
+    react.commit()
+    tree = react.render(card, props)
+    return tree
+  }
+  const fire = async (delay) => {
+    render()
+    for (const [id, timer] of [...timers]) {
+      if (timer.delay !== delay) continue
+      timers.delete(id)
+      void timer.fn()
+    }
+    await flush()
+    return render()
+  }
+  const view = { react, render, props, calls, writes, scroll, paragraphs, fire,
+    async open() {
+      render(); await flush(); render()
+      labeledButton(render(), '播放').props.onClick()
+      await fire(100)
+      labeledButton(render(), '暂停').props.onClick()
+      render()
+      scroll.scrollTop = 123
+      labeledButton(render(), '书内搜索').props.onClick()
+      return render()
+    },
+    change(query) {
+      const field = elements(render()).find((node) => node.props['aria-label'] === '正文关键词')
+      field.props.onChange({ target: { value: query } })
+      return render()
+    },
+    hit() { return withClass(render(), 'dshReadSearchHit') },
+  }
+  t.after(() => react.unmount())
+  return view
+}
+
+function searchPayload({ index = 100, snippet = 'needle', nextCursor = null } = {}) {
+  const start = `段落 ${index} `.length
+  return { ok: true, query: 'needle', results: [{ index, start,
+    end: start + 6, chapter: '第二章', snippet,
+    highlightStart: 0, highlightEnd: snippet.length, leading: false, trailing: false }], nextCursor }
+}
+
+test('书内搜索：暂停，预览远处段落并高亮，返回恢复原字符及滚动且不写进度', async (t) => {
+  const view = contentSearchFixture(t)
+  await view.open()
+  assert.match(textOf(view.render()), /请输入搜索关键词/)
+  assert.equal(labeledButton(view.render(), '播放').props.disabled, true)
+  view.change('needle')
+  await view.fire(250)
+  assert.match(textOf(view.hit()), /第 101 段.*第二章/)
+  await view.hit().props.onClick()
+  const target = elements(view.render()).find((node) => node.props['data-paragraph'] === '100')
+  assert.ok(target)
+  assert.equal(withClass(target, 'dshReadMatch').children[0], 'needle')
+  assert.equal(view.scroll.scrollTop, 777)
+  await view.fire(1200)
+  assert.equal(view.writes.length, 0)
+  labeledButton(view.render(), '返回原位置').props.onClick()
+  const returned = view.render()
+  assert.equal(withClass(returned, 'dshReadSearch'), undefined)
+  assert.equal(elements(returned).find((node) => node.props['data-paragraph'] === '4').children[0], '段落')
+  assert.equal(view.scroll.scrollTop, 123)
+  assert.ok(labeledButton(returned, '播放'))
+  await view.fire(1200)
+  assert.equal(view.writes.length, 0)
+  labeledButton(view.render(), '播放').props.onClick()
+  await view.fire(100)
+  await view.fire(1200)
+  assert.equal(view.writes.at(-1).index, 4)
+})
+
+test('书内搜索：只有从此处继续阅读才提交新进度，空格不能绕过预览', async (t) => {
+  const view = contentSearchFixture(t)
+  await view.open()
+  view.change('needle')
+  await view.fire(250)
+  await view.hit().props.onClick()
+  view.render().props.onKeyDown(keyEvent(' '))
+  await view.fire(100)
+  await view.fire(1200)
+  assert.equal(view.writes.length, 0)
+  labeledButton(view.render(), '从此处继续阅读').props.onClick()
+  view.render()
+  await view.fire(1200)
+  assert.equal(view.writes.at(-1).index, 100)
+  assert.ok(labeledButton(view.render(), '暂停'))
+})
+
+test('书内搜索：防抖取消旧请求，乱序返回不覆盖新词，空查询不请求', async (t) => {
+  const old = deferred()
+  const view = contentSearchFixture(t, { search: async (params) => params.get('query') === 'old' ? old.promise : searchPayload({ snippet: 'new' }) })
+  await view.open()
+  view.change('o'); view.change('ol'); view.change('old')
+  await view.fire(250)
+  const oldCall = view.calls.find((call) => call.url.includes('/search?'))
+  assert.equal(view.calls.filter((call) => call.url.includes('/search?')).length, 1)
+  view.change('new')
+  assert.equal(oldCall.options.signal.aborted, true)
+  await view.fire(250)
+  old.resolve(searchPayload({ snippet: 'old' }))
+  await flush()
+  assert.match(textOf(view.hit()), /new/)
+  assert.doesNotMatch(textOf(view.hit()), /old/)
+  view.change('   ')
+  await view.fire(250)
+  assert.equal(view.hit(), undefined)
+  assert.equal(view.calls.filter((call) => call.url.includes('/search?')).length, 2)
+  assert.match(textOf(view.render()), /请输入搜索关键词/)
+})
+
+test('书内搜索：游标翻页替换结果且可返回，错误能重试，无结果明确展示', async (t) => {
+  let fail = true
+  const view = contentSearchFixture(t, { search: async (params) => {
+    if (fail) throw new Error('解析失败')
+    return params.get('cursor') ? { ok: true, results: [], nextCursor: null } : searchPayload({ nextCursor: 'page2' })
+  } })
+  await view.open(); view.change('needle'); await view.fire(250)
+  assert.match(textOf(view.render()), /解析失败/)
+  fail = false
+  labeledButton(view.render(), '重试搜索').props.onClick()
+  await view.fire(250)
+  assert.ok(view.hit())
+  labeledButton(view.render(), '下一页').props.onClick()
+  await view.fire(250)
+  assert.equal(view.hit(), undefined)
+  assert.match(textOf(view.render()), /没有找到匹配内容/)
+  assert.ok(view.calls.some((call) => call.url.endsWith('&cursor=page2')))
+  labeledButton(view.render(), '上一页').props.onClick()
+  await view.fire(250)
+  assert.ok(view.hit())
+  await view.fire(1200)
+  assert.equal(view.writes.length, 0)
+})
+
+test('书内搜索：预览失败可重试，加载期间返回后旧正文不能覆盖原位置', async (t) => {
+  const pending = deferred()
+  let fail = true
+  const view = contentSearchFixture(t, { preview: async () => {
+    if (fail) throw new Error('正文读取失败')
+    return pending.promise
+  } })
+  await view.open(); view.change('needle'); await view.fire(250)
+  await view.hit().props.onClick()
+  assert.match(textOf(view.render()), /正文读取失败.*重试/)
+  assert.equal(labeledButton(view.render(), '从此处继续阅读').props.disabled, true)
+  fail = false
+  const flight = view.hit().props.onClick()
+  view.render()
+  labeledButton(view.render(), '返回原位置').props.onClick()
+  view.render()
+  pending.resolve({ ok: true, from: 98, items: view.paragraphs.slice(98) })
+  await flight
+  const tree = view.render()
+  assert.equal(elements(tree).find((node) => node.props['data-paragraph'] === '100'), undefined)
+  assert.equal(elements(tree).find((node) => node.props['data-paragraph'] === '4').children[0], '段落')
+})
+
+test('书内搜索：查询和片段是文本节点，不创建来源文本中的 HTML', async (t) => {
+  const malicious = '<img src=x onerror=alert(1)>'
+  const view = contentSearchFixture(t, { search: async () => searchPayload({ snippet: malicious }) })
+  await view.open(); view.change(malicious); await view.fire(250)
+  const hit = view.hit()
+  assert.equal(withClass(hit, 'dshReadMatch').children[0], malicious)
+  assert.equal(elements(hit).some((node) => node.type === 'img' || node.props.dangerouslySetInnerHTML), false)
+})
+
+for (const transition of ['unmount', 'session', 'book']) {
+  test(`书内搜索：${transition} 后旧搜索和预览失效`, async (t) => {
+    const pending = deferred()
+    const view = contentSearchFixture(t, { preview: () => pending.promise })
+    await view.open(); view.change('needle'); await view.fire(250)
+    const flight = view.hit().props.onClick()
+    view.render()
+    if (transition === 'unmount') view.react.unmount()
+    if (transition === 'session') { view.props.sessionId = 'other'; view.render() }
+    if (transition === 'book') {
+      view.props.node.data.book = { ...CARD_BOOK, path: '/other.txt' }
+      view.render()
+    }
+    pending.resolve({ ok: true, from: 98, items: view.paragraphs.slice(98) })
+    await flight
+    if (transition !== 'unmount') assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+    await view.fire(1200)
+    assert.equal(view.writes.length, 0)
+  })
+}
+
+test('书内搜索：同查询连续点击命中时，仅最新预览可以更改位置', async (t) => {
+  const old = deferred()
+  const view = contentSearchFixture(t, { search: async () => ({ ok: true, nextCursor: null,
+    results: [searchPayload().results[0], searchPayload({ index: 110 }).results[0]] }),
+  preview: async (params) => Number(params.get('from')) === 98 ? old.promise : undefined })
+  await view.open(); view.change('needle'); await view.fire(250)
+  const hits = () => elements(view.render()).filter((node) => String(node.props.className).includes('dshReadSearchHit'))
+  const pending = hits()[0].props.onClick()
+  view.render()
+  await hits()[1].props.onClick()
+  view.render()
+  old.resolve({ ok: true, from: 98, items: view.paragraphs.slice(98) })
+  await pending
+  assert.ok(elements(view.render()).some((node) => node.props['data-paragraph'] === '110' && node.props['data-active'] === 'true'))
+})
+
+for (const transition of ['return', 'session', 'book', 'unmount']) {
+  test(`书内搜索：${transition} 后旧查询响应被取消并丢弃`, async (t) => {
+    const old = deferred()
+    const view = contentSearchFixture(t, { search: () => old.promise })
+    await view.open(); view.change('needle'); await view.fire(250)
+    const request = view.calls.find((call) => call.url.includes('/search?'))
+    if (transition === 'return') labeledButton(view.render(), '返回原位置').props.onClick()
+    if (transition === 'session') view.props.sessionId = 'new-session'
+    if (transition === 'book') view.props.node.data.book = { ...CARD_BOOK, path: '/new-book.txt' }
+    if (transition === 'unmount') view.react.unmount()
+    else view.render()
+    assert.equal(request.options.signal.aborted, true)
+    old.resolve(searchPayload())
+    await flush()
+    if (transition !== 'unmount') assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+  })
+}
+
+test('书内搜索：预览后卸载重新打开恢复原字符，不能把预览作为恢复位置', async (t) => {
+  const view = playbackFixture(t, undefined, undefined, { search: async () => searchPayload({ index: 2, snippet: '尾声' }) })
+  await view.open()
+  view.tick(); view.tick()
+  assert.equal(view.position(), '春风')
+  await view.search('尾声')
+  await withClass(view.render(), 'dshReadSearchHit').props.onClick()
+  view.render(); view.persist()
+  assert.equal(view.writes.length, 0)
+  await view.remount()
+  assert.equal(view.position(), '春风')
+  assert.ok(labeledButton(view.render(), '播放'))
+})
+
+test('书内搜索：切到后台会话关闭预览，回到原会话保留原字符且暂停', async (t) => {
+  const view = playbackFixture(t, undefined, undefined, { search: async () => searchPayload({ index: 2, snippet: '尾声' }) })
+  await view.open(); view.tick(); view.tick()
+  await view.search('尾声')
+  await withClass(view.render(), 'dshReadSearchHit').props.onClick()
+  view.render()
+  view.switchTo('other')
+  assert.equal(withClass(view.render(), 'dshReadSearch'), undefined)
+  view.switchTo('reader')
+  assert.equal(view.position(), '春风')
+  assert.ok(labeledButton(view.render(), '播放'))
+  view.persist()
+  assert.equal(view.writes.length, 0)
+})
+
+for (const updated of [null, 0, 2]) {
+  test(`书内搜索：阅读中心明确设置 ${updated} 使搜索快照失效`, async (t) => {
+    const view = playbackFixture(t, undefined, undefined, { search: async () => searchPayload({ index: 2, snippet: '尾声' }) })
+    await view.open(); view.tick(); view.tick()
+    await view.search('尾声')
+    await withClass(view.render(), 'dshReadSearchHit').props.onClick()
+    view.render()
+    await view.editProgress(updated)
+    await flush()
+    const tree = view.render()
+    assert.equal(withClass(tree, 'dshReadSearch'), undefined)
+    view.persist()
+    assert.equal(view.savedProgress()?.index, updated === null ? undefined : updated)
+    assert.equal(view.writes.length, 1)
+  })
+}
