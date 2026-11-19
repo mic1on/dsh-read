@@ -848,6 +848,248 @@ test('the progress bar does not flash to 100% before the first window loads', ()
   assert.doesNotMatch(textOf(tree), /100\.0%/)
 })
 
+/* ── reading typography ─────────────────────────────────────────────────── */
+
+const TYPOGRAPHY_KEY = 'dsh-read:typography'
+
+function typographyField(tree, label) {
+  const control = elements(tree).find((element) => element.props['aria-label'] === label)
+  assert.ok(control, `expected ${label} control`)
+  return control
+}
+
+function proseStyle(tree) {
+  return { ...withClass(tree, 'dshReadStream').props.style }
+}
+
+const DEFAULT_PROSE_STYLE = {
+  '--dsh-read-font-size': '14.5px',
+  '--dsh-read-line-height': '1.95',
+  '--dsh-read-text-width': 'none',
+}
+
+function changeTypography(view, label, value) {
+  typographyField(view.render(), label).props.onChange({ target: { value: String(value) } })
+  return view.render()
+}
+
+function openTypography(view) {
+  labeledButton(view.render(), '排版').props.onClick()
+  return view.render()
+}
+
+test('排版默认收起，原生控件独立预览并立即保存，重新加载和重新打开后恢复', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  assert.equal(labeledButton(view.render(), '排版').props['aria-expanded'], false)
+  assert.equal(withClass(view.render(), 'dshReadTypography'), undefined)
+  assert.deepEqual(proseStyle(view.render()), DEFAULT_PROSE_STYLE)
+
+  let tree = openTypography(view)
+  assert.equal(labeledButton(tree, '排版').props['aria-expanded'], true)
+  assert.equal(typographyField(tree, '字号').props.type, 'range')
+  assert.equal(typographyField(tree, '字号').props.step, '0.5')
+  assert.equal(typographyField(tree, '行距').props.type, 'range')
+  assert.equal(typographyField(tree, '行距').props.step, '0.05')
+  assert.equal(typographyField(tree, '正文宽度').type, 'select')
+
+  tree = changeTypography(view, '字号', 22)
+  assert.deepEqual(proseStyle(tree), { ...DEFAULT_PROSE_STYLE, '--dsh-read-font-size': '22px' })
+  tree = changeTypography(view, '行距', 2.2)
+  assert.deepEqual(proseStyle(tree), {
+    ...DEFAULT_PROSE_STYLE, '--dsh-read-font-size': '22px', '--dsh-read-line-height': '2.2',
+  })
+  tree = changeTypography(view, '正文宽度', 720)
+  assert.equal(proseStyle(tree)['--dsh-read-text-width'], '720px')
+  assert.deepEqual(JSON.parse(view.values.get(TYPOGRAPHY_KEY)), { version: 1, fontSize: 22, lineHeight: 2.2, width: 720 })
+  assert.deepEqual(elements(tree).filter((el) => el.props.style?.['--dsh-read-font-size']).map((el) => el.props.className),
+    ['dshReadStream'], 'only the prose surface receives typography variables')
+
+  labeledButton(tree, '排版').props.onClick()
+  assert.equal(withClass(view.render(), 'dshReadTypography'), undefined)
+  assert.equal(proseStyle(view.render())['--dsh-read-font-size'], '22px')
+  const reopened = playbackFixture(t, [...view.values])
+  await reopened.open()
+  assert.deepEqual(proseStyle(reopened.render()), proseStyle(view.render()))
+  await view.remount()
+  assert.deepEqual(proseStyle(view.render()), proseStyle(reopened.render()))
+})
+
+test('恢复默认只重置排版，持久化结果在重新加载后仍为初始排版', async (t) => {
+  const view = playbackFixture(t, [
+    ['dsh-read:speed', JSON.stringify({ mode: 'fast', speed: 60 })],
+    ['dsh-read:auto-pause', 'false'],
+    [TYPOGRAPHY_KEY, JSON.stringify({ version: 1, fontSize: 28, lineHeight: 2.4, width: 900 })],
+  ])
+  await view.open()
+  openTypography(view)
+  labeledButton(view.render(), '恢复默认').props.onClick()
+  assert.deepEqual(proseStyle(view.render()), DEFAULT_PROSE_STYLE)
+  assert.equal(view.values.get('dsh-read:speed'), JSON.stringify({ mode: 'fast', speed: 60 }))
+  assert.equal(view.values.get('dsh-read:auto-pause'), 'false')
+  const reopened = playbackFixture(t, [...view.values])
+  await reopened.open()
+  assert.deepEqual(proseStyle(reopened.render()), DEFAULT_PROSE_STYLE)
+})
+
+for (const [label, stored, expected] of [
+  ['破损 JSON', '{oops', DEFAULT_PROSE_STYLE],
+  ['空值', 'null', DEFAULT_PROSE_STYLE],
+  ['数组', '[]', DEFAULT_PROSE_STYLE],
+  ['原始值', '42', DEFAULT_PROSE_STYLE],
+  ['未知版本', '{"version":2,"fontSize":20,"width":720}', DEFAULT_PROSE_STYLE],
+  ['旧版部分字段', '{"fontSize":18}', { ...DEFAULT_PROSE_STYLE, '--dsh-read-font-size': '18px' }],
+  ['非法字段独立回退', '{"version":1,"fontSize":"24","lineHeight":2.1,"width":"900"}',
+    { ...DEFAULT_PROSE_STYLE, '--dsh-read-line-height': '2.1' }],
+  ['限制范围和步长', '{"version":1,"fontSize":99,"lineHeight":1.421,"width":560}',
+    { '--dsh-read-font-size': '28px', '--dsh-read-line-height': '1.4', '--dsh-read-text-width': '560px' }],
+  ['下限和未知宽度', '{"fontSize":-20,"lineHeight":8,"width":123}',
+    { ...DEFAULT_PROSE_STYLE, '--dsh-read-font-size': '12px', '--dsh-read-line-height': '2.4' }],
+  ['非有限值', '{"fontSize":1e999,"lineHeight":null,"width":-1}', DEFAULT_PROSE_STYLE],
+]) {
+  test(`排版偏好容错：${label}`, (t) => {
+    const view = playbackFixture(t, [[TYPOGRAPHY_KEY, stored]])
+    assert.deepEqual(proseStyle(view.render()), expected)
+  })
+}
+
+test('排版在同页阅读卡片间同步，卸载后取消订阅，存储读写失败保留内存偏好', async (t) => {
+  let owner
+  const react = Object.fromEntries(Object.keys(createReact().React).map((name) =>
+    [name, (...args) => owner.React[name](...args)]))
+  const { registered } = mount(react, {
+    globals: { localStorage: { getItem() { throw new Error('blocked') }, setItem() { throw new Error('quota') } },
+      setTimeout: () => 0, clearTimeout() {} },
+    fetch: async () => response({ ok: true, progress: {}, notes: [], from: 0, items: [] }),
+  })
+  const card = registered.find((entry) => entry.options.name === 'conversation.chat.node').component
+  function reader(path, sessionId) {
+    const hooks = createReact()
+    const props = { sessionId, node: { id: path, data: { book: { ...CARD_BOOK, path } } } }
+    const view = { render() {
+      owner = hooks
+      const tree = hooks.render(card, props)
+      hooks.commit()
+      return tree
+    }, unmount() { hooks.unmount() } }
+    t.after(() => hooks.unmount())
+    return view
+  }
+  const first = reader('/books/first.txt', 'one')
+  const second = reader('/books/second.txt', 'two')
+  first.render(); second.render()
+  openTypography(first)
+  changeTypography(first, '字号', 24)
+  changeTypography(first, '正文宽度', 560)
+  assert.equal(proseStyle(second.render())['--dsh-read-font-size'], '24px')
+  assert.equal(proseStyle(second.render())['--dsh-read-text-width'], '560px')
+  openTypography(second)
+  changeTypography(second, '行距', 2.1)
+  assert.deepEqual(proseStyle(first.render()), {
+    '--dsh-read-font-size': '24px', '--dsh-read-line-height': '2.1', '--dsh-read-text-width': '560px',
+  }, 'a second card changes one field without losing the first card’s choices')
+  const third = reader('/books/third.txt', 'three')
+  assert.deepEqual(proseStyle(third.render()), proseStyle(first.render()))
+  second.unmount()
+  labeledButton(first.render(), '恢复默认').props.onClick()
+  assert.deepEqual(proseStyle(third.render()), DEFAULT_PROSE_STYLE)
+  await flush()
+})
+
+for (const state of ['playing', 'paused', 'auto-paused', 'finished']) {
+  test(`排版调整和恢复默认保持正文、进度和 ${state} 状态`, async (t) => {
+    const view = playbackFixture(t)
+    await view.open()
+    assert.ok(view.tick() && view.tick())
+    if (state === 'paused') labeledButton(view.render(), '暂停').props.onClick()
+    if (state === 'auto-paused') view.switchTo('other')
+    if (state === 'finished') for (let i = 0; i < 15 && view.tick(); i += 1) { /* finish the short book */ }
+    view.persist()
+    const snapshot = () => {
+      const tree = view.render()
+      return {
+        text: textOf(withClass(tree, 'dshReadProse')),
+        progress: textOf(withClass(tree, 'dshReadHead')),
+        playback: textOf(withClass(tree, 'dshReadControlsInner')),
+        saved: JSON.stringify(view.savedProgress()),
+      }
+    }
+    openTypography(view)
+    const before = snapshot()
+    const reads = view.reads.length
+    const writes = view.writes.length
+    changeTypography(view, '字号', 28)
+    changeTypography(view, '行距', 2.4)
+    changeTypography(view, '正文宽度', 900)
+    labeledButton(view.render(), '恢复默认').props.onClick()
+    await flush()
+    assert.deepEqual(snapshot(), before)
+    assert.equal(view.reads.length, reads, 'layout never reloads paragraphs or progress')
+    view.persist()
+    assert.equal(view.writes.length, writes, 'layout never schedules a progress write')
+    if (state === 'playing') {
+      assert.ok(view.tick())
+      assert.equal(view.position(), '春风又绿')
+    } else {
+      assert.equal(view.tick(), false, 'layout must not start playback')
+    }
+  })
+}
+
+test('排版控件保留键盘原生操作，不触发卡片空格播放快捷键', (t) => {
+  const view = playbackFixture(t)
+  let tree = openTypography(view)
+  for (const label of ['字号', '行距', '正文宽度']) {
+    const field = typographyField(tree, label)
+    const event = keyEvent(' ', { target: { tagName: field.type.toUpperCase() } })
+    tree.props.onKeyDown(event)
+    assert.equal(event.defaultPrevented, false)
+    assert.ok(labeledButton(view.render(), '播放'))
+  }
+  labeledButton(tree, '排版').props.onClick()
+  tree = view.render()
+  assert.equal(withClass(tree, 'dshReadTypography'), undefined)
+})
+
+test('展开和调整排版不会触发正文自动追随滚动', async (t) => {
+  const view = playbackFixture(t)
+  await view.open()
+  const stream = { scrollTop: 850, scrollHeight: 1000, clientHeight: 100,
+    addEventListener() {}, removeEventListener() {} }
+  withClass(view.render(), 'dshReadStream').props.ref(stream)
+  openTypography(view)
+  changeTypography(view, '字号', 28)
+  changeTypography(view, '行距', 2.4)
+  changeTypography(view, '正文宽度', 560)
+  assert.equal(stream.scrollTop, 850, 'layout renders must not pull a reader to the bottom')
+})
+
+test('排版布局约束正文宽度与图片比例，短窗口控件仍可滚动和键盘聚焦', () => {
+  const css = stylesheet()
+  const rule = (selector) => {
+    const start = css.indexOf(selector + '{')
+    assert.ok(start >= 0, `expected ${selector} rule`)
+    return css.slice(start + selector.length + 1, css.indexOf('}', start))
+  }
+  assert.match(rule('.dshReadProse'), /width:100%;max-width:var\(--dsh-read-text-width,none\)/)
+  assert.match(rule('.dshReadProse'), /margin-inline:auto/)
+  assert.match(rule('.dshReadBlock'), /overflow-wrap:anywhere/)
+  assert.match(rule('.dshReadBlock'), /font-size:var\(--dsh-read-font-size,14\.5px\)/)
+  assert.match(rule('.dshReadBlock'), /line-height:var\(--dsh-read-line-height,1\.95\)/)
+  const image = rule('.dshReadFigureImg')
+  assert.match(image, /max-width:100%/)
+  assert.match(image, /height:auto/)
+  assert.match(image, /box-sizing:border-box/)
+  assert.match(rule('.dshReadTypography'), /flex-wrap:wrap/)
+  assert.match(rule('.dshReadTypographyField'), /minmax\(0,1fr\)/)
+  assert.match(rule('.dshReadTypographyField input'), /min-width:0/)
+  assert.match(rule('.dshReadControls>.dshReadControlsBody'), /overflow:auto/,
+    'the scrolling rule must beat .dshReadFold>* overflow:hidden')
+  assert.match(rule('.dshReadControls'), /max-height:50%/)
+  assert.match(rule('.dshReadChapterInner'), /text-overflow:ellipsis/)
+  assert.match(css, /\.dshReadControls :is\(button,input,select\):focus-visible\{outline:2px solid/)
+})
+
 /* ── the 阅读 settings page ──────────────────────────────────────────────── */
 
 /** Mount the plugin and hand back the 阅读 settings page with its owner + standard props. */
