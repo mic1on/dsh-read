@@ -76,3 +76,30 @@ export interface ReadingProgress {
   /** Epoch milliseconds of the last update. */
   at: number
 }
+
+/** One literal occurrence in the current book. All character offsets use UTF-16 units. */
+export interface BookSearchHit {
+  /** Zero-based paragraph index. */
+  index: number
+  /** Match range within that paragraph. */
+  start: number
+  end: number
+  /** Absolute character offset in the extracted book text. */
+  offset: number
+  chapter: string
+  /** Bounded text context; render as text, never HTML. */
+  snippet: string
+  highlightStart: number
+  highlightEnd: number
+  leading: boolean
+  trailing: boolean
+}
+
+/** GET /dsh-read/api/search; default 20 results, hard maximum 50 per page. */
+export interface BookSearchPage {
+  ok: true
+  query: string
+  results: BookSearchHit[]
+  /** Opaque continuation token, tied to book identity and query. */
+  nextCursor: string | null
+}

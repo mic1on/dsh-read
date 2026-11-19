@@ -19,6 +19,7 @@ import { homedir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 
 import { BOOK_EXTENSIONS, bookImage, loadBook, paragraphWindow, publicBook } from './lib/book.mjs'
+import { searchBook, searchQuery } from './lib/book-search.mjs'
 import { NotesStore } from './lib/notes-store.mjs'
 import { mountAnswerCapture, recoverAnswers } from './lib/notes-answers.mjs'
 import { execFile } from 'node:child_process'
@@ -530,6 +531,26 @@ export function apply(ctx) {
       const from = Number(params.get('from') ?? 0)
       const count = Number(params.get('count') ?? 30)
       return { ok: true, path: entry.path, ...paragraphWindow(entry, from, count) }
+    })
+
+    register(`${API_PREFIX}/search`, async (req, res) => {
+      if (req.method !== 'GET') throw new Error('method not allowed')
+      const params = parameters(req)
+      const query = searchQuery(params.get('query'))
+      const controller = new AbortController()
+      const cancel = () => controller.abort()
+      req.once?.('aborted', cancel)
+      res.once?.('close', cancel)
+      try {
+        const entry = await loadBook(await requireBookPath(params.get('path')))
+        return { ok: true, ...(await searchBook(entry, {
+          query, cursor: params.get('cursor'), limit: params.get('limit') ?? undefined,
+          signal: controller.signal,
+        })) }
+      } finally {
+        req.off?.('aborted', cancel)
+        res.off?.('close', cancel)
+      }
     })
 
     // One illustration. Addressed by book + index rather than by path, so the only bytes
