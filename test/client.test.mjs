@@ -2461,6 +2461,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
   const calls = []
   const writes = []
   let getNotes = () => ({ ok: true, notes, archiveEnabled: true })
+  let removeNote = ({ remove }) => { notes = notes.filter((note) => note.id !== remove); return { ok: true, notes } }
   let getLocate = () => ({ ok: false, error: '无法可靠定位' })
   let getSearch = () => searchPayload({ index: 6 })
   let getPage = initialPage || ((params) => {
@@ -2470,6 +2471,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
   })
   const react = createReact()
   const settings = createReact()
+  const siblings = []
   let hookOwner = react
   const sharedReact = Object.fromEntries(Object.keys(react.React).map((name) => [name, (...args) => hookOwner.React[name](...args)]))
   const { registered } = mount(sharedReact, {
@@ -2480,6 +2482,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
       const params = new URL(url, 'http://test').searchParams
       if (url.includes('/notes/locate?')) return response(await getLocate(params))
       if (url.includes('/notes?')) return response(await getNotes(params))
+      if (url.endsWith('/notes') && options?.method === 'POST') return response(await removeNote(JSON.parse(options.body)))
       if (url.includes('/search?')) return response(await getSearch(params))
       if (url.includes('/paragraphs?')) return response(await getPage(params))
       if (url.endsWith('/progress') && options) {
@@ -2502,7 +2505,7 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
   render()
   await ready()
   const panel = () => withClass(render(), 'dshReadNotes')
-  t.after(() => { react.unmount(); settings.unmount() })
+  t.after(() => { react.unmount(); settings.unmount(); for (const sibling of siblings) sibling.unmount() })
   return { react, props, render, ready, panel, calls, writes, window, document, prose, book,
     open() { labeledButton(render(), '批注').props.onClick(); return render() },
     expand(id) {
@@ -2515,9 +2518,24 @@ async function reviewReader(t, { notes = [], paragraphs, count = 8, initialPage 
       return elements(item).find((el) => el.type === 'button' && /定位/.test(textOf(el))).props.onClick()
     },
     setNotes(fn) { getNotes = fn },
+    setRemove(fn) { removeNote = fn },
     setLocate(fn) { getLocate = fn },
     setPage(fn) { getPage = fn },
     setSearch(fn) { getSearch = fn },
+    sibling() {
+      const sibling = createReact()
+      siblings.push(sibling)
+      const siblingProps = { ...props, node: { id: `sibling-${siblings.length}`, data: { book } } }
+      const render = () => {
+        hookOwner = sibling
+        sibling.render(card, siblingProps); sibling.commit()
+        return sibling.render(card, siblingProps)
+      }
+      const ready = async () => { await flush(); render(); await flush(); return render() }
+      render()
+      return { render, ready, panel: () => withClass(render(), 'dshReadNotes'),
+        open() { labeledButton(render(), '批注').props.onClick(); return render() } }
+    },
     async search(query = 'needle') {
       labeledButton(render(), '书内搜索').props.onClick(); render()
       elements(render()).find((el) => el.props['aria-label'] === '正文关键词').props.onChange({ target: { value: query } })
@@ -2623,6 +2641,212 @@ test('问答展开区分完成、等待、中断、截断和不可用，兼容�
   }
   view.expand('blank')
   assert.match(textOf(view.panel()), /未填写笔记/)
+})
+
+function reviewItem(view, id) {
+  return elements(view.panel()).find((el) => el.props['data-note-id'] === id)
+}
+
+function deleteCalls(view) {
+  return view.calls.filter((call) => call.url.endsWith('/notes') && call.options?.method === 'POST')
+}
+
+function confirmRemoval(view, id) {
+  labeledButton(reviewItem(view, id), '删除').props.onClick()
+  return labeledButton(reviewItem(view, id), '确认删除').props.onClick()
+}
+
+test('批注删除入口在折叠时可见，确认说明范围，取消和返回阅读都不提交', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('memo'), reviewNote('question', 2, { kind: 'question' })] })
+  view.open(); await view.ready()
+  assert.equal(elements(view.panel()).filter((el) => el.type === 'button' && textOf(el) === '删除').length, 2)
+  assert.doesNotMatch(textOf(view.panel()), /笔记 memo/)
+  labeledButton(reviewItem(view, 'memo'), '删除').props.onClick()
+  assert.match(textOf(reviewItem(view, 'memo')), /Markdown 文件（含手写内容）也会删除，无法撤销/)
+  assert.equal(deleteCalls(view).length, 0)
+  labeledButton(reviewItem(view, 'memo'), '取消').props.onClick()
+  assert.equal(labeledButton(view.panel(), '确认删除'), undefined)
+  labeledButton(reviewItem(view, 'question'), '删除').props.onClick()
+  labeledButton(view.panel(), '返回阅读').props.onClick()
+  view.open(); await view.ready()
+  assert.equal(labeledButton(view.panel(), '确认删除'), undefined)
+  assert.equal(deleteCalls(view).length, 0)
+  assert.equal(elements(view.panel()).filter((el) => el.type === 'article').length, 2)
+})
+
+test('确认删除后立即同步列表、数量和正文标记，保留原字符与暂停且不写进度', async (t) => {
+  const notes = [reviewNote('first'), reviewNote('second'), reviewNote('other', 3)]
+  const view = await reviewReader(t, { notes })
+  view.react.setters[1](2); view.react.setters[2](4); view.render()
+  view.open(); await view.ready()
+  await confirmRemoval(view, 'first')
+  assert.equal(reviewItem(view, 'first'), undefined)
+  assert.match(textOf(view.panel()), /本书批注 · 2/)
+  assert.deepEqual(JSON.parse(deleteCalls(view)[0].options.body), { path: view.book.path, remove: 'first' })
+  labeledButton(view.panel(), '返回阅读').props.onClick()
+  let tree = view.render()
+  assert.ok(elements(tree).find((el) => el.props['aria-label'] === '查看第 2 段的 1 条批注'))
+  assert.equal(elements(tree).find((el) => el.props['data-paragraph'] === '2').children[0], view.prose[2].slice(0, 4))
+  assert.ok(labeledButton(tree, '播放'))
+  view.open(); await view.ready()
+  await confirmRemoval(view, 'second')
+  labeledButton(view.panel(), '返回阅读').props.onClick()
+  tree = view.render()
+  assert.equal(elements(tree).some((el) => String(el.props['aria-label']).startsWith('查看第 2 段的')), false)
+  assert.equal(view.writes.length, 0)
+})
+
+test('段落筛选删除最后一条显示段落空态，全部删除显示本书空态', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('one'), reviewNote('two', 2)] })
+  view.react.setters[1](2); view.react.setters[2](4)
+  elements(view.render()).find((el) => el.props['aria-label'] === '查看第 2 段的 1 条批注').props.onClick()
+  await view.ready()
+  await confirmRemoval(view, 'one')
+  assert.match(textOf(view.panel()), /第 2 段批注 · 0/)
+  assert.match(textOf(view.panel()), /这一段还没有批注/)
+  labeledButton(view.panel(), '全部批注').props.onClick()
+  await confirmRemoval(view, 'two')
+  assert.match(textOf(view.panel()), /本书批注 · 0/)
+  assert.match(textOf(view.panel()), /本书还没有批注/)
+})
+
+test('删除中防止重复请求并锁定冲突操作，失败保留记录、提示原因并可重试', async (t) => {
+  for (const failure of ['network', 'host', 'malformed']) {
+    await t.test(failure, async (t) => {
+      const view = await reviewReader(t, { notes: [reviewNote('kept'), reviewNote('other', 3)] })
+      const pending = deferred()
+      view.setRemove(async () => { await pending.promise; if (failure === 'network') throw new Error('网络断开')
+        return failure === 'host' ? { ok: false, error: '磁盘只读' } : { ok: true } })
+      view.open(); await view.ready(); view.expand('kept')
+      labeledButton(reviewItem(view, 'kept'), '删除').props.onClick()
+      const submit = labeledButton(view.panel(), '确认删除').props.onClick
+      const deleting = submit()
+      await submit()
+      assert.equal(deleteCalls(view).length, 1)
+      assert.equal(labeledButton(view.panel(), '正在删除…').props.disabled, true)
+      assert.equal(labeledButton(view.panel(), '取消').props.disabled, true)
+      assert.equal(labeledButton(view.panel(), '刷新').props.disabled, true)
+      assert.equal(labeledButton(view.panel(), '定位原文').props.disabled, true)
+      assert.equal(labeledButton(reviewItem(view, 'other'), '删除').props.disabled, true)
+      const reads = view.calls.filter((call) => call.url.includes('/notes?')).length
+      view.render().props.onFocus({ currentTarget: { contains: () => false }, relatedTarget: null })
+      assert.equal(view.calls.filter((call) => call.url.includes('/notes?')).length, reads)
+      pending.resolve()
+      await deleting
+      assert.ok(reviewItem(view, 'kept'))
+      assert.match(textOf(view.panel()), /删除失败：(?:网络断开|磁盘只读|批注列表格式不可用)/)
+      assert.equal(labeledButton(view.panel(), '刷新').props.disabled, false)
+      view.setRemove(() => ({ ok: true, notes: [reviewNote('other', 3)] }))
+      await labeledButton(view.panel(), '重试删除').props.onClick()
+      assert.equal(reviewItem(view, 'kept'), undefined)
+      assert.doesNotMatch(textOf(view.panel()), /删除失败/)
+    })
+  }
+})
+
+test('Markdown 删除部分失败时移除内部记录、保留可重试提示，普通刷新不丢失重试入口', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('deleted', 1, { kind: 'question' })] })
+  view.open(); await view.ready()
+  view.setRemove(() => ({ ok: true, notes: [], mdError: 'Markdown 删除失败：只读目录' }))
+  await confirmRemoval(view, 'deleted')
+  assert.equal(reviewItem(view, 'deleted'), undefined)
+  assert.match(textOf(view.panel()), /批注已删除，Markdown 删除失败：只读目录/)
+  const listing = deferred()
+  view.setNotes(() => listing.promise)
+  const refresh = labeledButton(view.panel(), '刷新').props.onClick()
+  assert.doesNotMatch(textOf(view.panel()), /正在加载批注/, 'refresh must not move the Markdown retry target')
+  listing.resolve({ ok: true, notes: [], archiveEnabled: true })
+  await refresh
+  view.setRemove(() => { throw new Error('仍不可用') })
+  await labeledButton(view.panel(), '重试删除 Markdown').props.onClick()
+  assert.match(textOf(view.panel()), /Markdown 删除重试失败：仍不可用/)
+  view.setRemove(() => ({ ok: true, notes: [] }))
+  await labeledButton(view.panel(), '重试删除 Markdown').props.onClick()
+  assert.equal(labeledButton(view.panel(), '重试删除 Markdown'), undefined)
+  assert.doesNotMatch(textOf(view.panel()), /删除失败/)
+  assert.deepEqual(deleteCalls(view).map((call) => JSON.parse(call.options.body).remove), ['deleted', 'deleted', 'deleted'])
+})
+
+test('删除作废先前刷新，删除期间读取不启动，迟到列表不能恢复旧记录', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('deleted'), reviewNote('kept')] })
+  view.open(); await view.ready()
+  const listing = deferred()
+  view.setNotes(() => listing.promise)
+  const refresh = labeledButton(view.panel(), '刷新').props.onClick()
+  assert.equal(withClass(view.panel(), 'dshReadNote'), undefined, 'background refresh must not insert a row that moves the delete button between focus and click')
+  assert.equal(labeledButton(reviewItem(view, 'deleted'), '删除').props.disabled, false, 'focus-triggered refresh must not swallow the first delete click')
+  labeledButton(reviewItem(view, 'deleted'), '删除').props.onClick()
+  const pending = deferred()
+  view.setRemove(() => pending.promise)
+  const deleting = labeledButton(view.panel(), '确认删除').props.onClick()
+  view.render().props.onFocus({ currentTarget: { contains: () => false }, relatedTarget: null })
+  pending.resolve({ ok: true, notes: [reviewNote('kept')] })
+  await deleting
+  listing.resolve({ ok: true, notes: [reviewNote('deleted'), reviewNote('kept')], archiveEnabled: true })
+  await refresh; await view.ready()
+  assert.equal(reviewItem(view, 'deleted'), undefined)
+  assert.match(textOf(view.panel()), /本书批注 · 1/)
+})
+
+test('删除响应晚于切书、切会话或正文版本变化时不覆盖新列表和提示', async (t) => {
+  for (const change of ['book', 'session', 'revision']) {
+    await t.test(change, async (t) => {
+      const view = await reviewReader(t, { notes: [reviewNote('old')] })
+      view.open(); await view.ready()
+      const pending = deferred()
+      view.setRemove(() => pending.promise)
+      const deleting = confirmRemoval(view, 'old')
+      if (change === 'book') view.props.node = { id: 'other', data: { book: { ...view.book, path: '/books/other.txt' } } }
+      else if (change === 'revision') view.props.node.data.book = { ...view.book, revision: 'new-version' }
+      else view.props.sessionId = 'other-session'
+      view.setNotes(() => ({ ok: true, notes: [reviewNote('new')], archiveEnabled: true }))
+      view.render(); view.open(); await view.ready()
+      pending.resolve({ ok: true, notes: [], mdError: 'Markdown 删除失败：旧目录' })
+      await deleting; await view.ready()
+      assert.ok(reviewItem(view, 'new'))
+      assert.doesNotMatch(textOf(view.panel()), /旧目录|正在删除|摘录 old/)
+      assert.match(textOf(view.panel()), /本书批注 · 1/)
+      labeledButton(reviewItem(view, 'new'), '删除').props.onClick()
+      labeledButton(view.panel(), '取消').props.onClick()
+      assert.equal(labeledButton(view.panel(), '确认删除'), undefined)
+    })
+  }
+})
+
+test('删除请求卸载后不更新组件状态', async (t) => {
+  const view = await reviewReader(t, { notes: [reviewNote('old')] })
+  view.open(); await view.ready()
+  const pending = deferred()
+  view.setRemove(() => pending.promise)
+  const deleting = confirmRemoval(view, 'old')
+  view.react.unmount()
+  const before = textOf(view.panel())
+  pending.resolve({ ok: true, notes: [], mdError: 'Markdown 删除失败：已卸载' })
+  await deleting
+  assert.equal(textOf(view.panel()), before)
+})
+
+test('同书两张卡片并发删除后，迟到的响应不会恢复另一张卡片已删除的批注', async (t) => {
+  const first = reviewNote('first'), second = reviewNote('second'), kept = reviewNote('kept')
+  const view = await reviewReader(t, { notes: [first, second, kept] })
+  const sibling = view.sibling()
+  await sibling.ready()
+  view.open(); sibling.open(); await view.ready(); await sibling.ready()
+  const a = deferred(), b = deferred()
+  view.setRemove(({ remove }) => remove === 'first' ? a.promise : b.promise)
+  const deleteFirst = confirmRemoval(view, 'first')
+  const deleteSecond = confirmRemoval(sibling, 'second')
+  view.setNotes(() => ({ ok: true, notes: [kept], archiveEnabled: true }))
+  b.resolve({ ok: true, notes: [kept] })
+  await deleteSecond
+  a.resolve({ ok: true, notes: [second, kept] })
+  await deleteFirst; await view.ready(); await sibling.ready()
+  for (const reader of [view, sibling]) {
+    assert.equal(reviewItem(reader, 'first'), undefined)
+    assert.equal(reviewItem(reader, 'second'), undefined)
+    assert.ok(reviewItem(reader, 'kept'))
+    assert.match(textOf(reader.panel()), /本书批注 · 1/)
+  }
 })
 
 test('批注加载有加载态、空态和重试，刷新失败保留旧数据且明确标记', async (t) => {
