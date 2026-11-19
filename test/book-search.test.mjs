@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { searchBook } from '../lib/book-search.mjs'
 import { detectChapters, snapChapters, splitParagraphs } from '../lib/book.mjs'
@@ -6,6 +7,7 @@ import { detectChapters, snapChapters, splitParagraphs } from '../lib/book.mjs'
 function book(text) {
   const paragraphs = splitParagraphs(text)
   return { path: '/test/book.txt', chars: text.length, paragraphCount: paragraphs.length,
+    revision: createHash('sha256').update(text).digest('hex'),
     paragraphs, chapters: snapChapters(detectChapters(paragraphs), paragraphs) }
 }
 
@@ -60,7 +62,9 @@ test('rejects empty, oversized queries, invalid limits, and cursors from other q
   }
   await assert.rejects(searchBook(entry, { query: 'y', cursor: nextCursor }), /游标/)
   await assert.rejects(searchBook({ ...entry, path: '/another.txt' }, { query: 'x', cursor: nextCursor }), /游标/)
-  await assert.rejects(searchBook({ ...entry }, { query: 'x', cursor: nextCursor }), /游标/)
+  await assert.rejects(searchBook(book('x '.repeat(101)), { query: 'x', cursor: nextCursor }), /游标/)
+  const next = await searchBook(book('x '.repeat(100)), { query: 'x', cursor: nextCursor })
+  assert.equal(next.results[0].start, 40, 'the same content may be reparsed into a new object')
 })
 
 test('skips images and returns safe source text without interpreting query markup', async () => {

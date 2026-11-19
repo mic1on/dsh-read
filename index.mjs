@@ -21,6 +21,7 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { BOOK_EXTENSIONS, bookImage, loadBook, paragraphWindow, publicBook } from './lib/book.mjs'
 import { searchBook, searchQuery } from './lib/book-search.mjs'
 import { NotesStore } from './lib/notes-store.mjs'
+import { noteLocation } from './lib/notes-location.mjs'
 import { mountAnswerCapture, recoverAnswers } from './lib/notes-answers.mjs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -528,6 +529,9 @@ export function apply(ctx) {
     register(`${API_PREFIX}/paragraphs`, async (req) => {
       const params = parameters(req)
       const entry = await loadBook(await requireBookPath(params.get('path')))
+      if (params.has('revision') && params.get('revision') !== entry.revision) {
+        throw new Error('书籍内容已变化，请重新打开书籍后继续阅读。')
+      }
       const from = Number(params.get('from') ?? 0)
       const count = Number(params.get('count') ?? 30)
       return { ok: true, path: entry.path, ...paragraphWindow(entry, from, count) }
@@ -543,6 +547,9 @@ export function apply(ctx) {
       res.once?.('close', cancel)
       try {
         const entry = await loadBook(await requireBookPath(params.get('path')))
+        if (params.has('revision') && params.get('revision') !== entry.revision) {
+          throw new Error('书籍内容已变化，请重新打开书籍后搜索。')
+        }
         return { ok: true, ...(await searchBook(entry, {
           query, cursor: params.get('cursor'), limit: params.get('limit') ?? undefined,
           signal: controller.signal,
@@ -585,6 +592,26 @@ export function apply(ctx) {
       }
       const result = await readingNotesOperation({ action: 'list', path: parameters(req).get('path') })
       return { ok: true, ...result, archiveEnabled: await notesStore.archiveEnabled() }
+    })
+
+    register(`${API_PREFIX}/notes/locate`, async (req) => {
+      if (req.method !== 'GET') throw new Error('method not allowed')
+      const params = parameters(req)
+      const path = await requireBookPath(params.get('path'))
+      const id = params.get('id')
+      if (!id) throw new Error('缺少批注标识。')
+      const notes = (await notesStore.notes())[path]
+      const matches = Array.isArray(notes) ? notes.filter((note) => note?.id === id) : []
+      if (matches.length !== 1) throw new Error('这条批注不存在或标识有歧义，请刷新批注列表。')
+      let entry
+      try { entry = await loadBook(path, { fresh: true }) }
+      catch (error) { throw new Error(`无法读取原书，文件可能已移动、删除或不可用：${messageOf(error)}`) }
+      const index = noteLocation(entry, matches[0])
+      return {
+        ok: true, index,
+        book: { ...publicBook(entry), archiveEnabled: await notesStore.archiveEnabled() },
+        ...paragraphWindow(entry, Math.max(0, index - 2), 60),
+      }
     })
 
     register(`${API_PREFIX}/vault`, async (req) => {

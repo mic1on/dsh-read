@@ -56,6 +56,8 @@ export interface PublicBook {
   bytes: number
   /** Total paragraph count; the cursor runs from 0 to `paragraphCount - 1`. */
   paragraphCount: number
+  /** Parsed content revision; optional for reader cards recorded by older versions. */
+  revision?: string
   chapters: BookChapter[]
   /** Snapshot hint; refreshed by the annotations endpoint. */
   archiveEnabled?: boolean
@@ -99,7 +101,9 @@ export interface BookSearchHit {
 export interface BookSearchPage {
   ok: true
   query: string
+  /** Content version used to validate previews and subsequent pages. */
+  revision: string
   results: BookSearchHit[]
-  /** Opaque continuation token, tied to book identity and query. */
+  /** Continuation token tied to path, content revision and query; not an auth token. */
   nextCursor: string | null
 }
